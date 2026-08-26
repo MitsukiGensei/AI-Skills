@@ -1,51 +1,53 @@
-# MikuLuaProfiler 接入说明（第三方，不随本仓库分发）
+# MikuLuaProfiler integration notes (third-party, not distributed with this repo)
 
-AI Profiler 的 Lua 维度（Lua CPU / Lua VM GC / 真机 Lua 采样）默认以 **MikuLuaProfiler** 作为参考后端。它是第三方开源库，本仓库**不附带其源码**：
+**English** | [中文](README.zh-CN.md)
 
-- 上游仓库：<https://github.com/leinlin/Miku-LuaProfiler>（MIT）
-- 本目录 `patches/` 基于的上游基线见 [patches/UPSTREAM_BASE.txt](patches/UPSTREAM_BASE.txt)
+The Lua dimensions of AI Profiler (Lua CPU / Lua VM GC / on-device Lua sampling) use **MikuLuaProfiler** as the reference backend by default. It is a third-party open-source library and **its source is not bundled in this repo**:
 
-## 用不用得上
+- Upstream repository: <https://github.com/leinlin/Miku-LuaProfiler> (MIT)
+- The upstream baseline that `patches/` in this directory is based on: [patches/UPSTREAM_BASE.txt](patches/UPSTREAM_BASE.txt)
 
-| 工程情况 | 做法 |
+## Do you need it
+
+| Project situation | What to do |
 |---|---|
-| 没有 Lua | 什么都不用做。`LuaProfilerBackend.Current` 是 Null 实现，导出 LUA_HOTSPOTS 为 NO DATA |
-| 有 Lua，用 Miku | 装上游 Miku → Player Settings 加 Scripting Define `AI_PROFILER_MIKU` → `Assets/AIProfiler/Runtime/Miku/MikuLuaProfilerBackend.cs` 自动生效（Editor 本地采样即可用）。要真机无上限采样再打下面的补丁 |
-| 有 Lua，用别的 profiler | 实现 `ILuaProfilerBackend`（`Assets/AIProfiler/Runtime/LuaProfilerBackend.cs`），启动时 `LuaProfilerBackend.Register(实例)` |
+| No Lua | Nothing. `LuaProfilerBackend.Current` is the Null implementation; LUA_HOTSPOTS exports as NO DATA |
+| Lua, using Miku | Install upstream Miku → add the Scripting Define `AI_PROFILER_MIKU` in Player Settings → `Assets/AIProfiler/Runtime/Miku/MikuLuaProfilerBackend.cs` takes effect automatically (Editor-local sampling works as is). For unlimited on-device sampling, also apply the patches below |
+| Lua, using another profiler | Implement `ILuaProfilerBackend` (`Assets/AIProfiler/Runtime/LuaProfilerBackend.cs`) and call `LuaProfilerBackend.Register(instance)` at startup |
 
-## 适配器的设计：只依赖上游公开 API，扩展点用反射探测
+## Adapter design: depends only on the upstream public API, probes extension points via reflection
 
-`MikuLuaProfilerBackend` 编译期只用上游已有的成员：`LuaDeepProfilerSetting.Instance`（`isLocal / isRecord / isStartRecord / ip / port / m_isDeepLuaProfiler`）、`LuaProfiler.RegisterOnReceiveSample / UnRegistReceive / mainL`、`Sample.RegAction / UnRegAction` 与 `Sample` 字段、`HeartBeatMsg` 类型、`NetWorkMgrClient.Connect / Disconnect / GetIsConnect`（Editor 程序集，反射调用）。
+At compile time `MikuLuaProfilerBackend` uses only members that already exist upstream: `LuaDeepProfilerSetting.Instance` (`isLocal / isRecord / isStartRecord / ip / port / m_isDeepLuaProfiler`), `LuaProfiler.RegisterOnReceiveSample / UnRegistReceive / mainL`, `Sample.RegAction / UnRegAction` and the `Sample` fields, the `HeartBeatMsg` type, `NetWorkMgrClient.Connect / Disconnect / GetIsConnect` (Editor assembly, called via reflection).
 
-AI Profiler 真机链路需要的几处能力上游没有，**无法用 override / 扩展方法从外部补上**（都是类内部行为：Hook 安装时机、采样休眠、心跳载荷、发送队列）。适配器对这些成员用反射探测，**打了补丁就启用，没打就降级**：
+A few capabilities the AI Profiler on-device pipeline needs do not exist upstream and **cannot be added from the outside via override / extension methods** (they are all class-internal behavior: Hook install timing, sampling sleep, heartbeat payload, send queue). The adapter probes these members via reflection — **enabled when patched, degraded when not**:
 
-| 扩展点 | 用途 | 未打补丁时的行为 |
+| Extension point | Purpose | Behavior without the patch |
 |---|---|---|
-| `HookLuaSetup.IsInitialized` / `IsDeepProfilerReady` | Editor 本地 StartRecord 前校验 Hook 与 Lua VM 就绪 | 以 `LuaProfiler.mainL != IntPtr.Zero` 代替 |
-| `LuaDeepProfilerSetting.ProfilerWinOpen`（实例属性，持久化） | 进 Play 时按"面板是否打开"决定装不装 Hook | 上游是 `static bool`，同样能设，但不持久化（域重载后需重开面板） |
-| `LuaDeepProfilerSetting.isDeepLuaProfiler`（带 Save 的属性） | 深度采样开关持久化 | 直接写 `m_isDeepLuaProfiler` 字段 + `Save()` |
-| `HeartBeatMsg.hookReady / captureActive` + `RegAction` | 真机 1Hz 状态心跳：Hook 是否就绪、是否在采样 | `RemoteStatusSupported=false`，面板按"TCP 已连接即就绪"兜底 |
-| `LuaProfiler.SetRemoteCaptureActive(bool)` | 真机 Hook 平时休眠，只在 StartRecord~StopRecord 之间产 Sample；断线/停录恢复 Lua GC、清队列 | no-op：上游 Hook 一装上就持续采样并发送 |
-| `HookLuaSetup.OpenRemoteProfiler()` | GM 菜单写"下次启动装 Hook"的一次性标记 | 直接写上游约定的标记文件 `persistentDataPath/LUAPROFILER_SERVER` |
+| `HookLuaSetup.IsInitialized` / `IsDeepProfilerReady` | Verifies Hook and Lua VM readiness before Editor-local StartRecord | Falls back to `LuaProfiler.mainL != IntPtr.Zero` |
+| `LuaDeepProfilerSetting.ProfilerWinOpen` (instance property, persisted) | Decides on entering Play whether to install the Hook based on "is the window open" | Upstream has a `static bool`, which can be set the same way but is not persisted (the window must be reopened after a domain reload) |
+| `LuaDeepProfilerSetting.isDeepLuaProfiler` (property with Save) | Persists the deep-sampling switch | Writes the `m_isDeepLuaProfiler` field directly + `Save()` |
+| `HeartBeatMsg.hookReady / captureActive` + `RegAction` | On-device 1Hz status heartbeat: Hook ready, sampling active | `RemoteStatusSupported=false`; the window falls back to "TCP connected = ready" |
+| `LuaProfiler.SetRemoteCaptureActive(bool)` | On-device Hook sleeps normally and produces Samples only between StartRecord and StopRecord; restores Lua GC and clears the queue on disconnect / stop | no-op: the upstream Hook samples and sends continuously once installed |
+| `HookLuaSetup.OpenRemoteProfiler()` | The GM menu writes a one-shot "install the Hook on next launch" flag | Writes the upstream-convention flag file `persistentDataPath/LUAPROFILER_SERVER` directly |
 
-## patches/ 里有什么
+## What is in patches/
 
-按文件给出的 `diff -u`（`a/` = 上游基线，`b/` = 源工程的修改版）。**注意**：源工程的 Miku 是在更早的上游版本上修改的 fork，所以 diff 里混有少量与 AI Profiler 无关的差异（Windows hook / 解析器等）。**不要整包 `git apply`**，按下面的改动点从各 diff 里择取 hunk 手工合入：
+Per-file `diff -u` (`a/` = upstream baseline, `b/` = the source project's modified version). **Note**: the source project's Miku is a fork modified on top of an older upstream version, so the diffs contain a few differences unrelated to AI Profiler (Windows hook / parser, etc.). **Do not `git apply` them wholesale**; pick the hunks for the change points below out of each diff and merge them by hand:
 
-| 文件 | AI Profiler 相关改动点 |
+| File | AI-Profiler-related change points |
 |---|---|
-| `LuaHookSetup.cs.diff` | ① `IsInitialized` / `IsDeepProfilerReady` 只读属性；② `OpenRemoteProfiler()`；③ 真机按一次性标记文件（`LuaProfiler.CheckServerIsOpen`）自动切远程+深度并装 Hook，`ConsumeServerOpenRequest` 消费标记；④ server 只 `BeginListen` 不阻塞等编辑器；⑤ Editor 未开面板（`ProfilerWinOpen=false`）时不装 Hook、`isInite` 如实为 false；⑥ `RuntimeInitializeOnLoadMethod(SubsystemRegistration)` 重置静态态，兼容关闭 Domain Reload |
-| `LuaProfiler.cs.diff` | `CheckServerIsOpen / OpenServer / CloseServer / ConsumeServerOpenRequest`；`SetRemoteCaptureActive` + `ShouldCaptureSample`（远程未激活时 Begin/EndSample 直接返回、恢复 Lua GC、清队列）；`SendProfilerStatus` 发 `HeartBeatMsg.Create(mainL就绪, 采样中)` 代替空 Sample 心跳；协程 LuaState 的采样丢弃 |
-| `PKGHeartBeat.cs.diff` | `HeartBeatMsg` 增加 `hookReady / captureActive` 载荷、`Create / RegAction / UnRegAction`、Read/Write |
-| `NetWorkMgr.cs.diff` / `NetWorkMgr.Server.cs.diff` | 发送队列硬限 `MAX_PENDING_COMMANDS=128`（未连接时到达即回收）、`ClearPendingCommands`、`_Close` 时清队列并 Dispose、发送线程逐条出队 |
-| `NetWorkMgr.Client.cs.diff`（Editor） | 接收线程绑定到具体 TcpClient（重连不串线）、包头校验抛错、断线时正确复位 `_isConnected` |
-| `LuaDeepProfilerSetting.cs.diff` | `ProfilerWinOpen` 改实例属性并持久化；`isDeepLuaProfiler` / `discardInvalid` 属性 |
-| `Sample.cs.diff` | `CheckSampleValid`（可选的空样本丢弃），非必需 |
+| `LuaHookSetup.cs.diff` | ① `IsInitialized` / `IsDeepProfilerReady` read-only properties; ② `OpenRemoteProfiler()`; ③ on device, switch to remote + deep and install the Hook automatically based on the one-shot flag file (`LuaProfiler.CheckServerIsOpen`), `ConsumeServerOpenRequest` consumes the flag; ④ the server only `BeginListen`s without blocking for the editor; ⑤ in the Editor, do not install the Hook when the window is not open (`ProfilerWinOpen=false`) and report `isInite` as false truthfully; ⑥ `RuntimeInitializeOnLoadMethod(SubsystemRegistration)` resets static state, compatible with Domain Reload disabled |
+| `LuaProfiler.cs.diff` | `CheckServerIsOpen / OpenServer / CloseServer / ConsumeServerOpenRequest`; `SetRemoteCaptureActive` + `ShouldCaptureSample` (Begin/EndSample return immediately when remote capture is inactive, restore Lua GC, clear the queue); `SendProfilerStatus` sends `HeartBeatMsg.Create(mainL ready, sampling)` instead of an empty-Sample heartbeat; samples from coroutine LuaStates are dropped |
+| `PKGHeartBeat.cs.diff` | `HeartBeatMsg` gains the `hookReady / captureActive` payload, `Create / RegAction / UnRegAction`, Read/Write |
+| `NetWorkMgr.cs.diff` / `NetWorkMgr.Server.cs.diff` | Hard send-queue limit `MAX_PENDING_COMMANDS=128` (recycled on arrival when not connected), `ClearPendingCommands`, clear the queue and Dispose on `_Close`, the send thread dequeues one at a time |
+| `NetWorkMgr.Client.cs.diff` (Editor) | Receive thread bound to a specific TcpClient (no cross-talk on reconnect), packet header validation throws, `_isConnected` reset correctly on disconnect |
+| `LuaDeepProfilerSetting.cs.diff` | `ProfilerWinOpen` becomes an instance property and is persisted; `isDeepLuaProfiler` / `discardInvalid` properties |
+| `Sample.cs.diff` | `CheckSampleValid` (optional empty-sample discarding), not required |
 
-合入后重新编译，`MikuLuaProfilerBackend` 的反射探测会自动发现这些成员；面板真机页的 Lua 状态会从"按连接即就绪"变成真实的 Hook 心跳状态。
+After merging and recompiling, `MikuLuaProfilerBackend`'s reflection probing discovers these members automatically; the Lua status on the window's device page changes from "connected = ready" to the real Hook heartbeat status.
 
-## 其他
+## Other notes
 
-- 真机 Lua 采样的 Development 包需要 Miku 自己的宏 `USE_LUA_PROFILER`（gate `HookLuaSetup`），与本工具的 `AI_PROFILER_DEVICE`（gate `DeviceFrameRecorder`）是两个宏，都要加。
-- Miku 的二进制（`Editor/CECIL/Miku.Cecil.dll`、`Runtime/Plugins/Android/**` 的 ShadowHook）直接用上游的。
-- Miku 端口默认 2333；面板 ADB 一键连接把它转发为 `tcp:2333`，与 `AIProfilerWindow.LUA_PROFILER_ADB_PORT` 一致。
+- A Development build for on-device Lua sampling needs Miku's own define `USE_LUA_PROFILER` (gates `HookLuaSetup`); together with this tool's `AI_PROFILER_DEVICE` (gates `DeviceFrameRecorder`) that is two defines — add both.
+- Miku's binaries (`Editor/CECIL/Miku.Cecil.dll`, the ShadowHook under `Runtime/Plugins/Android/**`) are used straight from upstream.
+- Miku's default port is 2333; the window's ADB one-click connect forwards it as `tcp:2333`, matching `AIProfilerWindow.LUA_PROFILER_ADB_PORT`.
