@@ -1,0 +1,126 @@
+--- a/LuaProfiler/Runtime/Core/NetWork/NetWorkMgr.cs
++++ b/LuaProfiler/Runtime/Core/NetWork/NetWorkMgr.cs
+@@ -15,6 +15,7 @@
+         private static Thread receiveThread;
+         private static Thread sendThread;
+         private const int PACK_HEAD = 0x114514;
++        private const int MAX_PENDING_COMMANDS = 128;
+         private const float HEART_BEAT_DELTA = float.MaxValue; // 永不超时 (原来是10分钟)
+         public static float lastBeatTime = 0;
+         public static float curTime = 0;
+@@ -80,36 +81,69 @@
+         private static void _Close()
+         {
+             isClose = true;
+-            if (tcpClient != null)
++            TcpClient client = tcpClient;
++            tcpClient = null;
++            if (client != null)
+             {
+                 if (OnDisconnect != null)
+                 {
+-                    var clientCtx = tcpClient;
+-                    tcpClient = null;
++                    var clientCtx = client;
+                     Action actionDisconnect = () => OnDisconnect(clientCtx);
+                     lock(m_eventQueue)
+                         m_eventQueue.Enqueue(actionDisconnect);
+                 }
++                try
++                {
++                    client.Close();
++                }
++                catch
++                {
++                }
+             }
++            ClearPendingCommands();
+         }
+ 
+         public static void Disconnect()
+         {
+-            isClose = true;
++            _Close();
+         }
+ 
+         public static bool CheckIsConnected()
+         {
+-            return tcpClient != null;
++            return tcpClient != null && !isClose;
+         }
+ 
+         public static void SendCmd(PacketBase cmd)
+         {
++            if (cmd == null)
++            {
++                return;
++            }
+             lock (m_cmdQueue)
+             {
++                if (!CheckIsConnected())
++                {
++                    cmd.WriteOver();
++                    return;
++                }
++                while (m_cmdQueue.Count >= MAX_PENDING_COMMANDS)
++                {
++                    m_cmdQueue.Dequeue().WriteOver();
++                }
+                 m_cmdQueue.Enqueue(cmd);
+             }
+         }
++
++        public static void ClearPendingCommands()
++        {
++            lock (m_cmdQueue)
++            {
++                while (m_cmdQueue.Count > 0)
++                {
++                    m_cmdQueue.Dequeue().WriteOver();
++                }
++            }
++        }
+         #endregion
+ 
+         #region private
+@@ -190,14 +224,28 @@
+ 
+                     if (ns.CanWrite)
+                     {
+-                        lock (m_cmdQueue)
++                        while (true)
+                         {
+-                            while (m_cmdQueue.Count > 0)
++                            PacketBase msg = null;
++                            lock (m_cmdQueue)
++                            {
++                                if (m_cmdQueue.Count > 0)
++                                {
++                                    msg = m_cmdQueue.Dequeue();
++                                }
++                            }
++                            if (msg == null)
++                            {
++                                break;
++                            }
++                            try
+                             {
+-                                var msg = m_cmdQueue.Dequeue();
+                                 bw.Write(PACK_HEAD);
+                                 bw.Write((int)msg.MsgHead);
+                                 msg.Write(bw);
++                            }
++                            finally
++                            {
+                                 msg.WriteOver();
+                             }
+                         }
+@@ -205,7 +253,7 @@
+                 }
+                 catch (Exception e)
+                 {
+-                    if (tcpClient.Connected)
++                    if (tcpClient != null && tcpClient.Connected)
+                     {
+                         UnityEngine.Debug.Log(e);
+                     }

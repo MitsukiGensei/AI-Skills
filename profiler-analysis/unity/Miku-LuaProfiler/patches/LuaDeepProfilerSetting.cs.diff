@@ -1,0 +1,85 @@
+--- a/LuaProfiler/Runtime/Common/Setting/LuaDeepProfilerSetting.cs
++++ b/LuaProfiler/Runtime/Common/Setting/LuaDeepProfilerSetting.cs
+@@ -63,11 +63,48 @@
+         
+         #endregion
+ 
+-        public static bool ProfilerWinOpen = false;
++        public bool ProfilerWinOpen {            
++            get
++            {
++                return m_profilerWinOpen;
++            }
++            set
++            {
++                if (m_profilerWinOpen != value)
++                {
++                    m_profilerWinOpen = value;
++                    Save();
++                }
++            } }
++            
++        public bool m_profilerWinOpen= false;
++
++        public bool isDeepLuaProfiler
++        {
++            get
++            {
++                return m_isDeepLuaProfiler;
++            }
++            set
++            {
++                if (m_isDeepLuaProfiler != value)
++                {
++                    m_isDeepLuaProfiler = value;
++                    Save();
++                }
++            }
++        }
+ 
+         public bool isLocal
+         {
+-            get => m_isLocal;
++            get
++            {
++#if UNITY_5_6_OR_NEWER && UNITY_EDITOR_WIN
++                return m_isLocal;
++#else
++                return false;
++#endif
++            }
+             set
+             {
+                 if (m_isLocal != value)
+@@ -93,6 +130,23 @@
+                 }
+             }
+         }
++        
++
++        public bool discardInvalid
++        {
++            get
++            {
++                return m_discardInvalid;
++            }
++            set
++            {
++                if (m_discardInvalid != value)
++                {
++                    m_discardInvalid = value;
++                    Save();
++                }
++            }
++        }
+ 
+         public int captureFrameRate
+         {
+@@ -226,7 +280,6 @@
+         public string m_ip = "127.0.0.1";
+         public int m_port = 2333;
+ 
+-        [SerializeField]
+         private bool m_isRecord = false;
+         [SerializeField]
+         private List<string> m_luaDir = new List<string>();

@@ -1,0 +1,79 @@
+--- a/LuaProfiler/Runtime/Core/NetWork/Packet/Sample.cs
++++ b/LuaProfiler/Runtime/Core/NetWork/Packet/Sample.cs
+@@ -9,15 +9,7 @@
+     public class Sample: PacketBase<Sample>
+     {
+         #region head
+-
+-        public override MsgHead MsgHead
+-        {
+-            get
+-            {
+-                return MsgHead.ProfileSampleData;
+-            }
+-        }
+-        
++        public override MsgHead MsgHead => MsgHead.ProfileSampleData;
+ 
+         public int currentLuaMemory;
+         public int currentMonoMemory;
+@@ -92,6 +84,47 @@
+             }
+         }
+ 
++        public bool CheckSampleValid()
++        {
++            bool result = false;
++            do
++            {
++                if (needShow)
++                {
++                    result = true;
++                    break;
++                }
++                var setting = LuaDeepProfilerSetting.Instance;
++                if (setting != null && !setting.discardInvalid)
++                {
++                    result = true;
++                    break;
++                }
++
++                if (costLuaGC != 0)
++                {
++                    result = true;
++                    break;
++                }
++
++                if (costMonoGC != 0)
++                {
++                    result = true;
++                    break;
++                }
++
++                if (costTime > 10000)
++                {
++                    result = true;
++                    break;
++                }
++
++            } while (false);
++
++
++            return result;
++        }
++
+         private static Dictionary<object, Dictionary<object, string>> m_fullNamePool = new Dictionary<object, Dictionary<object, string>>();
+         public string fullName
+         {
+@@ -831,10 +864,7 @@
+         
+         public override void OnRun()
+         {
+-            if (OnReciveSample != null)
+-            {
+-                OnReciveSample.Invoke(this); 
+-            }
++            OnReciveSample?.Invoke(this);
+         }
+         
+         #endregion

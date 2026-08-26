@@ -1,0 +1,45 @@
+{
+  "_comment": "profiler-analysis 项目配置样例：复制为 profiler_config.json 放在脚本旁（或 --config 指定）。所有键可选，值会追加到脚本内置的通用默认表。",
+  "log_dir": "Assets/ProfilerLogs",
+  "src_root": "Assets/Lua",
+  "noise_cs_substr": [
+    "commonutilswrap.beginsample",
+    "commonutilswrap.endsample"
+  ],
+  "noise_lua_loc_substr": [
+    "framework/profiler"
+  ],
+  "lua_framework_dispatchers": [
+    [
+      "tolua/event",
+      "_event.__call",
+      "framework-dispatcher:event-beat"
+    ],
+    [
+      "tolua/event",
+      "_xpcall.__call",
+      "framework-wrapper:xpcall"
+    ],
+    [
+      "framework/common/scheduler/schedulecomponent",
+      "_performupdate",
+      "framework-dispatcher:update-scheduler"
+    ],
+    [
+      "framework/common/scheduler/timer",
+      "ontimer",
+      "framework-dispatcher:timer"
+    ],
+    [
+      "framework/core/ui/basecomponent",
+      "_performupdate",
+      "framework-dispatcher:ui-component-update"
+    ],
+    [
+      "framework/core/ui/basecomponent",
+      "onupdate",
+      "framework-dispatcher:ui-component-update"
+    ]
+  ],
+  "cs_framework_dispatcher_substr": []
+}

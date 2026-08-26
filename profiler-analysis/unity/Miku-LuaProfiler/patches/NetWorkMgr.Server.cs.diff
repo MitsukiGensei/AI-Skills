@@ -1,0 +1,35 @@
+--- a/LuaProfiler/Runtime/Core/NetWork/NetWorkMgr.Server.cs
++++ b/LuaProfiler/Runtime/Core/NetWork/NetWorkMgr.Server.cs
+@@ -35,7 +35,7 @@
+         public static void Close()
+         {
+             RemoveAllListeners();
+-            isClose = true;
++            _Close();
+             if (tcpLister != null)
+             {
+                 tcpLister.Stop();
+@@ -79,20 +79,9 @@
+             
+             // 有新的连接，强制踢掉旧连接（不然偶尔会出现莫名挂掉无法连接） TODO: 支持多客户端并发连接
+             _Close();
+-            if (tcpClient != null)
+-            {
+-                tcpClient.Close();
+-            }
+-
+-            if (receiveThread != null)
+-            {
+-                receiveThread.Join();
+-            }
+-            
+-            if (sendThread != null)
+-            {
+-                sendThread.Join();
+-            }
++            tcpClient?.Close();
++            receiveThread?.Join();
++            sendThread?.Join();
+ 
+             tcpClient = newTcpClient;
+             lastBeatTime = curTime;

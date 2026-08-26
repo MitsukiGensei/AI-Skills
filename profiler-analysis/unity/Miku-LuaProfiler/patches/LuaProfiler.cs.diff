@@ -1,0 +1,402 @@
+--- a/LuaProfiler/Runtime/Core/Driver/LuaProfiler.cs
++++ b/LuaProfiler/Runtime/Core/Driver/LuaProfiler.cs
+@@ -52,6 +52,9 @@
+         private static IntPtr _mainL = IntPtr.Zero;
+         private static readonly Stack<Sample> beginSampleMemoryStack = new Stack<Sample>();
+         private static int m_currentFrame = 0;
++        private static int m_gcFrame = 0;
++        private static long m_gcMemory = 0;
++        private static bool m_remoteCaptureActive = false;
+         public static int mainThreadId = -100;
+         const long MaxB = 1024;
+         const long MaxK = MaxB * 1024;
+@@ -60,6 +63,49 @@
+         
+         private const string SERVER_CONFIG_NAME = "/LUAPROFILER_SERVER";
+ 
++        public static bool CheckServerIsOpen()
++        {
++            return File.Exists(Application.persistentDataPath + SERVER_CONFIG_NAME);
++        }
++
++        public static void OpenServer()
++        {
++            string path = Application.persistentDataPath + SERVER_CONFIG_NAME;
++            if (!File.Exists(path))
++            {
++                File.WriteAllText(path, "1");
++            }
++            
++            Debug.Log("open lua profiler server success");
++        }
++
++        public static void CloseServer()
++        {
++            SetRemoteCaptureActive(false);
++            string path = Application.persistentDataPath + SERVER_CONFIG_NAME;
++            if (File.Exists(path))
++            {
++                File.Delete(path);
++            }
++            Debug.Log("close lua profiler server success");
++        }
++
++        public static void ConsumeServerOpenRequest()
++        {
++            string path = Application.persistentDataPath + SERVER_CONFIG_NAME;
++            try
++            {
++                if (File.Exists(path))
++                {
++                    File.Delete(path);
++                }
++            }
++            catch (Exception e)
++            {
++                Debug.LogWarning("[MikuLuaProfiler] 消费一次性启动标记失败: " + e.Message);
++            }
++        }
++
+         private static Action<Sample> m_onReceiveSample;
+         private static Action<LuaRefInfo> m_onReceiveRef;
+         private static Action<LuaDiffInfo> m_onReceiveDiff;
+@@ -97,6 +143,7 @@
+                 if (value != IntPtr.Zero)
+                 {
+                     m_hasL = true;
++                    LuaDLL.luaL_initlibs(value);
+                 }
+                 else
+                 {
+@@ -112,6 +159,55 @@
+                 return System.Threading.Thread.CurrentThread.ManagedThreadId == mainThreadId;
+             }
+         }
++
++        public static bool IsRemoteCaptureActive
++        {
++            get { return m_remoteCaptureActive; }
++        }
++
++        private static bool ShouldCaptureSample()
++        {
++            LuaDeepProfilerSetting profilerSetting = LuaDeepProfilerSetting.Instance;
++            return profilerSetting == null || profilerSetting.isLocal || m_remoteCaptureActive;
++        }
++
++        public static void SetRemoteCaptureActive(bool active)
++        {
++            if (m_remoteCaptureActive == active)
++            {
++                if (!active)
++                {
++                    NetWorkMgr.ClearPendingCommands();
++                }
++                return;
++            }
++
++            m_remoteCaptureActive = active;
++            if (active)
++            {
++                m_currentFrame = SampleData.frameCount - 1;
++                m_gcFrame = SampleData.frameCount;
++                m_gcMemory = 0;
++                return;
++            }
++
++            while (beginSampleMemoryStack.Count > 0)
++            {
++                beginSampleMemoryStack.Pop().Restore();
++            }
++            if (_mainL != IntPtr.Zero)
++            {
++                try
++                {
++                    LuaDLL.lua_gc_unhook(_mainL, LuaGCOptions.LUA_GCRESTART, 0);
++                }
++                catch (Exception e)
++                {
++                    Debug.LogWarning("[MikuLuaProfiler] 恢复 Lua GC 失败: " + e.Message);
++                }
++            }
++            NetWorkMgr.ClearPendingCommands();
++        }
+         #endregion
+ 
+         #region sample
+@@ -131,21 +227,45 @@
+                 return System.Diagnostics.Stopwatch.GetTimestamp();
+             }
+         }
+-
+-        public static void BeginSample(IntPtr luaState, string name)
++        public static void BeginSample(IntPtr luaState, string name, bool needShow = false)
+         {
+             if (!IsMainThread)
+             {
+                 return;
+             }
+ 
++            // 放弃协程
++            if (luaState != _mainL)
++            {
++                return;
++            }
++
++            if (!ShouldCaptureSample())
++            {
++                return;
++            }
++
+             try
+             {
+-                int frameCount = Time.frameCount;
++                int frameCount = SampleData.frameCount;
+                 long memoryCount = LuaLib.GetLuaMemory(luaState);
++                if (frameCount - m_gcFrame >= 300 && memoryCount >= m_gcMemory)
++                {
++                    if (luaState != IntPtr.Zero)
++                    {
++                        LuaDLL.lua_gc_unhook(luaState, LuaGCOptions.LUA_GCCOLLECT, 0);
++                    }
++                    memoryCount = LuaLib.GetLuaMemory(luaState);
++                    m_gcFrame = frameCount;
++                    m_gcMemory = (long)(memoryCount * 1.2f);
++                }
+ 
+                 if (m_currentFrame != frameCount)
+                 {
++                    if (luaState != IntPtr.Zero)
++                    {
++                        LuaDLL.lua_gc_unhook(luaState, LuaGCOptions.LUA_GCSTOP, 0);
++                    }
+                     m_currentFrame = frameCount;
+                     PopAllSampleWhenLateUpdate(luaState);
+                 }
+@@ -158,54 +278,33 @@
+             }
+         }
+ 
+-        public static int GetStackDepth()
+-        {
+-            return beginSampleMemoryStack.Count;
+-        }
+-
+         public static void PopAllSampleWhenLateUpdate(IntPtr luaState)
+         {
+-            if (beginSampleMemoryStack.Count <= 0) return;
+-            
+-            Debug.LogError("stack not match, pop all sample");
+-            
+             while(beginSampleMemoryStack.Count > 0)
+             {
+                 EndSample(luaState);
+             }
+         }
+-        
+-        public static void EndSampleCortoutine(IntPtr luaState)
++        public static void EndSample(IntPtr luaState)
+         {
+-            int oldDepth = (int)LuaDLL.lua_tonumber(luaState, 1);
+-            int newDepth = GetStackDepth();
+-            if (newDepth > oldDepth)
++            if (!IsMainThread)
+             {
+-                for (int i = 0, imax = newDepth - oldDepth; i < imax; i++)
+-                {
+-                    EndSample(luaState);
+-                }
+-
+-                LuaDLL.lua_pushnumber(luaState, newDepth - oldDepth);
+-                LuaDLL.lua_replace(luaState, 1);
++                return;
+             }
+-            else
++
++            // 放弃协程
++            if (luaState != _mainL)
+             {
+-                LuaDLL.lua_pushnumber(luaState, 0);
+-                LuaDLL.lua_replace(luaState, 1);
++                return;
+             }
+-        }
+-        
+-        public static void EndSample(IntPtr luaState)
+-        {
+-            if (!IsMainThread)
++
++            if (!ShouldCaptureSample())
+             {
+                 return;
+             }
+ 
+             if (beginSampleMemoryStack.Count <= 0)
+             {
+-                Debug.LogError("stack not match, pop all sample");
+                 return;
+             }
+             long nowMemoryCount = LuaLib.GetLuaMemory(luaState);
+@@ -219,19 +318,26 @@
+             sample.currentMonoMemory = (int)nowMonoCount;
+             sample.costLuaGC = (int)luaGC;
+             sample.costMonoGC = (int)monoGC;
+-            
++
++            // if (!sample.CheckSampleValid())
++            // {
++            //     sample.Restore();
++            //     return;
++            // }
+             sample.fahter = beginSampleMemoryStack.Count > 0 ? beginSampleMemoryStack.Peek() : null;
+             //UnityEngine.Debug.Log(sample.name);
+             if (beginSampleMemoryStack.Count == 0)
+             {
+-                LuaDLL.ClearFreeSize();
+-
+-#if !UNITY_EDITOR
+-                NetWorkMgr.SendCmd(sample);
+-#else
+-                if(m_onReceiveSample != null)
++                var setting = LuaDeepProfilerSetting.Instance;
++                if (setting == null) return;
++                if (!setting.isLocal)
++                {
++                    NetWorkMgr.SendCmd(sample);
++                }
++                else if(m_onReceiveSample != null)
++                {
+                     m_onReceiveSample(sample);
+-#endif
++                }
+             }
+             //释放掉被累加的Sample
+             if (beginSampleMemoryStack.Count != 0 && sample.fahter == null)
+@@ -240,20 +346,116 @@
+             }
+         }
+ 
+-        public static void SendFrameSample()
++        public static void SendProfilerStatus()
+         {
+-            long memoryCount = 0;
+-            if (_mainL != IntPtr.Zero)
+-                memoryCount = LuaDLL.lua_gc(_mainL, LuaGCOptions.LUA_GCCOUNT, 0) * 1024;
+-            Sample sample = Sample.Create(getcurrentTime, (int)memoryCount, "");
+-#if !UNITY_EDITOR
+-                NetWorkMgr.SendCmd(sample);
+-#else
+-            if(m_onReceiveSample != null)
+-                m_onReceiveSample(sample);
+-#endif
++            var setting = LuaDeepProfilerSetting.Instance;
++            if (setting != null && !setting.isLocal && NetWorkMgr.CheckIsConnected())
++            {
++                NetWorkMgr.SendCmd(HeartBeatMsg.Create(_mainL != IntPtr.Zero, m_remoteCaptureActive));
++            }
++        }
++
++        #endregion
++
++        #region ref
++        private static Dictionary<byte, RefDict> m_refDict = new Dictionary<byte, RefDict>(4);
++
++        public static void AddRef(string refName, string refAddr, byte type)
++        {
++            LuaDeepProfilerSetting setting = LuaDeepProfilerSetting.Instance;
++            if (setting != null && !setting.isLocal && !m_remoteCaptureActive)
++            {
++                return;
++            }
++            RefDict refDict;
++            if (!m_refDict.TryGetValue(type, out refDict))
++            {
++                refDict = new RefDict(2048);
++                m_refDict.Add(type, refDict);
++            }
++
++            HashSet<string> addrList;
++            if (!refDict.TryGetValue(refName, out addrList))
++            {
++                addrList = new HashSet<string>();
++                refDict.Add(refName, addrList);
++            }
++            if (!addrList.Contains(refAddr))
++            {
++                addrList.Add(refAddr);
++            }
++            SendAddRef(refName, refAddr, type);
+         }
++        public static void SendAddRef(string funName, string funAddr, byte type)
++        {
++            LuaRefInfo refInfo = LuaRefInfo.Create(1, funName, funAddr, type);
++            var setting = LuaDeepProfilerSetting.Instance;
++            if (!setting.isLocal)
++            {
++                NetWorkMgr.SendCmd(refInfo);
++            }
++            else if (m_onReceiveRef != null)
++            {
++                m_onReceiveRef(refInfo);
++            }
++        }
++        public static void RemoveRef(string refName, string refAddr, byte type)
++        {
++            LuaDeepProfilerSetting setting = LuaDeepProfilerSetting.Instance;
++            if (setting != null && !setting.isLocal && !m_remoteCaptureActive)
++            {
++                return;
++            }
++            if (string.IsNullOrEmpty(refName)) return;
++            RefDict refDict;
+ 
++            if (!m_refDict.TryGetValue(type, out refDict))
++            {
++                return;
++            }
++
++            HashSet<string> addrList;
++            if (!refDict.TryGetValue(refName, out addrList))
++            {
++                return;
++            }
++            if (!addrList.Contains(refAddr))
++            {
++                return;
++            }
++            addrList.Remove(refAddr);
++            if (addrList.Count == 0)
++            {
++                refDict.Remove(refName);
++            }
++            SendRemoveRef(refName, refAddr, type);
++        }
++        public static void SendRemoveRef(string funName, string funAddr, byte type)
++        {
++            LuaRefInfo refInfo = LuaRefInfo.Create(0, funName, funAddr, type);
++            var setting = LuaDeepProfilerSetting.Instance;
++            if (!setting.isLocal)
++            {
++                NetWorkMgr.SendCmd(refInfo);
++            }
++            else if (m_onReceiveRef != null)
++            {
++                m_onReceiveRef(refInfo);
++            }
++        }
++        public static void SendAllRef()
++        {
++            foreach (var dictItem in m_refDict)
++            {
++                foreach (var hashList in dictItem.Value)
++                {
++                    foreach (var item in hashList.Value)
++                    {
++                        SendAddRef(hashList.Key, item, dictItem.Key);
++                    }
++                }
++            }
++        }
+         #endregion
+ 
+     }

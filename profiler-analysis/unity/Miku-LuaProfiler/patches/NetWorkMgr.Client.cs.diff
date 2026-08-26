@@ -1,0 +1,134 @@
+--- a/LuaProfiler/Editor/Window/ProfilerWin/NetWork/NetWorkMgr.Client.cs
++++ b/LuaProfiler/Editor/Window/ProfilerWin/NetWork/NetWorkMgr.Client.cs
+@@ -30,10 +30,9 @@
+                 if (t.Namespace == "MikuLuaProfiler"
+                     && t.IsSubclassOf(typeof(PacketBase)))
+                 {
+-                    var attrs = t.GetCustomAttributes(typeof(PacketMsgAttribute), false);
+-                    if (attrs != null && attrs.Length > 0)
++                    var attr = t.GetCustomAttribute<PacketMsgAttribute>();
++                    if (attr != null)
+                     {
+-                        var attr = (PacketMsgAttribute)attrs[0];
+                         receiveMsgDict[(int)attr.msgHead] = t;
+                         receiveMsgTypeDict[t] = (int)attr.msgHead;
+                     }
+@@ -43,23 +42,23 @@
+ 
+         public static void Disconnect()
+         {
++            _isConnected = false;
+             if (tcpClient != null)
+             {
+                 tcpClient.Close();
++                tcpClient.Dispose();
+                 tcpClient = null;
+                 if (bw != null)
+                 {
+-                    bw.Close();
++                    bw.Dispose();
+                     bw = null;
+                 }
+ 
+                 if (br != null)
+                 {
+-                    br.Close();
++                    br.Dispose();
+                     br = null;
+                 }
+-
+-                _isConnected = false;
+             }
+         }
+ 
+@@ -76,7 +75,10 @@
+                 receiveThread.Abort();
+                 receiveThread = null;
+             }
+-            receiveThread = new Thread(DoReceiveMessage);
++            TcpClient client = tcpClient;
++            NetworkStream clientStream = ns;
++            MBinaryReader clientReader = br;
++            receiveThread = new Thread(() => DoReceiveMessage(client, clientStream, clientReader));
+             receiveThread.Name = "Client ReceiveThread";
+             receiveThread.Start();
+             _isConnected = true;
+@@ -87,32 +89,34 @@
+             return _isConnected;
+         }
+ 
+-        private static void DoReceiveMessage()
++        private static void DoReceiveMessage(TcpClient client, NetworkStream clientStream, MBinaryReader clientReader)
+         {
+             while (true)
+             {
+                 try
+                 {
+-                    if (tcpClient == null)
++                    if (client == null || !ReferenceEquals(tcpClient, client))
+                     {
+                         break;
+                     }
+ 
+-                    while (ns.CanRead && ns.DataAvailable)
++                    while (clientStream.CanRead && clientStream.DataAvailable)
+                     {
+-                        int head = br.ReadInt32();
+-                        //处理粘包
+-                        if (head == PACK_HEAD)
++                        int head = clientReader.ReadInt32();
++                        if (head != PACK_HEAD)
++                        {
++                            throw new InvalidDataException("Invalid Miku profiler packet head: " + head);
++                        }
++
++                        int messageId = clientReader.ReadInt32();
++                        Type t;
++                        if (!receiveMsgDict.TryGetValue(messageId, out t))
+                         {
+-                            int messageId = br.ReadInt32();
+-                            Type t;
+-                            if (receiveMsgDict.TryGetValue(messageId, out t))
+-                            {
+-                                var msg = Activator.CreateInstance(t) as PacketBase;
+-                                msg.Read(br);
+-                                msg.OnRun();
+-                            }
++                            throw new InvalidDataException("Unknown Miku profiler message id: " + messageId);
+                         }
++                        var msg = Activator.CreateInstance(t) as PacketBase;
++                        msg.Read(clientReader);
++                        msg.OnRun();
+                     }
+                 }
+                 catch (Exception e)
+@@ -124,9 +128,20 @@
+             }
+ 
+ 
+-            if (receiveThread != null)
++            if (ReferenceEquals(tcpClient, client))
++            {
++                _isConnected = false;
++                tcpClient = null;
++                try
++                {
++                    client.Close();
++                }
++                catch
++                {
++                }
++            }
++            if (receiveThread == Thread.CurrentThread)
+             {
+-                receiveThread.Abort();
+                 receiveThread = null;
+             }
+         }
+@@ -145,4 +160,4 @@
+ 
+     }
+ }
+-#endif
+\ No newline at end of file
++#endif
