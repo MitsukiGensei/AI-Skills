@@ -97,6 +97,9 @@ B1  source=autotest|lint|compile|correctness|rules|requirements|rootcause
 | WP-01 | S | 1 | all pass | 0 | — |
 | WP-02 | M→L | 2 | test:fail→pass | correctness×2 | 根因 X |
 
+### 接缝统计
+登记 N 条 / owner 全覆盖 ✓ / 波次扫描 K 次 / 终验新发现接缝 0（非 0 → 接缝类型枚举漏了一类，补进 SKILL.md §4.1.3）
+
 ### ⚠️ 待关注（请事后复核）
 - 空实现 + TODO 项 / UNVERIFIED 断言 / 视觉副作用
 - 已知风险区登记的 WARN
