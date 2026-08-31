@@ -1,0 +1,72 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rebuttals", "summary"],
+  "properties": {
+    "rebuttals": {
+      "type": "array",
+      "description": "Exactly one entry per finding in the OTHER engine's report. Every finding must be answered - silence is not a position.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "finding_id",
+          "stance",
+          "reason",
+          "evidence",
+          "disposition",
+          "fix_agreement",
+          "counter_fix"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "description": "The other report's finding id (F1, F2, ...)."
+          },
+          "stance": {
+            "type": "string",
+            "enum": ["AGREE", "PARTIAL", "REJECT"],
+            "description": "AGREE = real defect at the stated severity. PARTIAL = real but severity or root cause is wrong. REJECT = not a defect."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One sentence. For REJECT this must state why the code is actually correct, not merely that you would have written it differently."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "<=1 line of code-level evidence for the stance. A stance with no evidence is dropped by the arbiter, whichever side made it."
+          },
+          "disposition": {
+            "type": "string",
+            "enum": ["accept", "downgrade", "drop", "needs-probe"],
+            "description": "What should happen to the finding. needs-probe = neither side can settle it by reading; name the probe in counter_fix."
+          },
+          "fix_agreement": {
+            "type": "string",
+            "enum": ["same", "different", "n/a"],
+            "description": "Whether you would fix it the same way the other engine proposed."
+          },
+          "counter_fix": {
+            "type": "string",
+            "description": "If fix_agreement is 'different', the fix you would apply instead and why it is the root-cause fix. If disposition is 'needs-probe', the exact probe (command, grep, breakpoint) that settles it. Otherwise empty."
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agree", "partial", "reject", "needs_probe", "missed_by_other"],
+      "properties": {
+        "agree": { "type": "integer" },
+        "partial": { "type": "integer" },
+        "reject": { "type": "integer" },
+        "needs_probe": { "type": "integer" },
+        "missed_by_other": {
+          "type": "string",
+          "description": "At most 3 lines: BLOCK-level defects the other report missed entirely, in the same [severity] file:line - claim - evidence shape. Empty if none."
+        }
+      }
+    }
+  }
+}

@@ -10,8 +10,10 @@
 
 - **档位自动挡**：按触及文件数、跨介质层数、契约变更、风险区自动定 S / M / L 档。小需求降到轻量档（一个 dev agent + 一次单审），大需求才展开多波并行；换挡由客观触发器驱动，不凭感觉。
 - **模型分级派工**：每次派 Agent 显式传 model（haiku 跑腿 / sonnet 机械 / opus 常规 / fable 架构与对抗终验），并支持「投机起草」——规格完整的包降一档起草，审核环节当验证器。
-- **Codex 外援**：规格已写死的大工作包可丢给 Codex CLI（gpt-5.6-sol，max + fast 档）后台跑，消耗另一个额度池；默认弹可视终端窗口直播过程。
-- **独立 review 收敛**：reviewer 一律全新 subagent、只喂 diff + 验收标准、不喂实现者推理；S 档单审四视角，M 档多模型交叉审核 1 轮，L 档完整多轮交叉审核 + completeness-critic 确认轮。争议 finding 走实证分流，不加辩论轮。
+- **Codex 编队，不再一次一个**：规格已写死的工作包交给 Codex CLI，它吃的是另一个额度池。现在用一份 manifest 一次拉起多个——每个有自己的 prompt、自己的输出目录、自己的访问档——而不是过去那种「起一个、等它回来、再起下一个」，那等于把系统里最慢的资源串行化。codex 对标 `opus` 档承接开发包，不只做审核；它的产出与 Claude agent 走同一套闸门、越界检查和独立 review，不因为是最强外部模型就免检。
+- **边界靠 prompt，不靠沙箱**：从 Codex CLI 0.150 起，Windows 上的只读沙箱会拒绝**一切**子进程——「只读」的 reviewer 连 grep 都跑不了，却仍然正常退出、交出一份看起来很自信的空报告。所以 taskforce 改为绕过沙箱，由 wrapper 在 prompt 顶部自动注入只读契约或写契约，手写的派单文件想漏也漏不掉；在沙箱已失效的版本上显式要求旧沙箱，脚本会直接报错拒跑，而不是交回一份空壳评审。
+- **独立 review 收敛**：reviewer 一律全新 subagent、只喂 diff + 验收标准、不喂实现者推理；S 档单审四视角，M / L 档由 Claude 与 Codex 对同一份 diff 各自独立审、再收敛。争议 finding 走实证分流，不加辩论轮。
+- **审核产物是结构化的，归并才能机械执行**：两侧都按 JSON schema 出结论。每条 finding 必须带证据、根因、根因归属层（代码 / 配表 / 资产 / 协议 / 三方 / 规格）和具体改法——只说「这里我不喜欢」而没有处理方式的不算 finding。随后只有一轮质证：每一方都必须对对方的每一条表态，沉默视同同意，没有代码级证据的否决直接作废，谁都不许开新战场。留下来的按一张固定的表归并，而不是让 PM 读两篇散文自己对齐；只有真僵持才进实证 probe，每包至多 3 条。这一步就是防止两个强模型各说各话的关键。
 - **状态外置**：全程状态落 `<工作区根>/.taskforce/<task-slug>/taskboard.md`（唯一 SSOT），扛得住高频上下文压缩——压缩后重读任务板即断点恢复，不需要 resume 参数。
 - **每条接缝都有主**：把需求拆成工作包，包与包之间必然出现接口——这里叫「接缝」。每条接缝在任务板的接缝登记表里占一行，登记唯一的 owner、契约（签名 / 数据形状 / 语义约定）、一条可机判的验证方式和版本历史。第一波派工前登记表填不满就不派，「暂名」「以 recon 为准」这类占位契约不接受。改契约 = 追加一行版本记录，再给受影响的 agent 发一行指针，不新开一轮文件或讨论。
 - **接缝早验，不等终验**：owner 包在过闸门时顺手验自己的接缝，每个波次边界再派一个便宜的 runner 扫一遍全表。大任务的跨包终验从「全表已绿」的证据出发，而不是从头找缝。
@@ -31,6 +33,8 @@
 - **文件协作只在消息成为瓶颈时才划算。** 共享文件策略在消息密集的 8 人场景里省了约 42% 的输出 token，但在链式任务上反而多花 10–17%。taskforce 本来就是文件优先，所以契约变更只加一行登记 + 一行指针消息，不再叠加任何新的文件纪律。
 - **够得着就会去看。** 在 sealed 复现里，80% 的运行去翻了没让它们看的评分材料，66% 读了其他 agent 的私有 prompt。所以交叉审核的结论写到对方物理上够不着的地方，而不是靠一句「禁止读」。
 - **单次运行只是样本量 1。** 同一配置跑两次，消息量可以差 15 倍。所以投机记录改为「某领域被方向性拒绝 → 该领域投机比例降半」，而不是「两次即停」；卡死的 agent 也不允许不带诊断地原样重试。
+
+1.2.0 版（2026-08-31）把这些发现固化成一张**每开一个新 agent 前先自查**的清单，并在落地真并行时逐条对齐：codex 编队一包一独立目录、审核产物在全队收工前封存在任务目录之外（够得着的路径就会被够）；归并规则机械化、PM 只在修法冲突时一次拍板（"协调者"头衔测不出任何领导力）；加人之前先过并行上限和"这个包的规格写满了吗"（16 个 agent 的消息量和 8 个一样多）。
 
 ## 使用方式
 
@@ -58,20 +62,27 @@ Copy-Item -Recurse taskforce "<项目根>\.claude\skills\taskforce"
 | `--verify` | 关 | 收敛验证模式：改动已做好（手改 / 其他工具产出），跳过定档与拆包，直接对当前未提交改动跑 review 收敛 + 收口 |
 | `--no-test` | 关 | 廉价闸门跳过自动化测试（仅静态闸门） |
 | `--no-checkout` | 关 | 跳过 P4 收口 |
+| `--codex=N` | 3 | 本波 codex 并行上限（脚本硬顶 6，且与 Claude agent 共用每波 ≤6 预算） |
+| `--no-codex` | 关 | 不用外援：开发全由 Claude agent 承担，review 退化为单引擎（记进任务板） |
 
 档位不设参数——自动判定，用户一句话（如「这个走 L」「WP-05 按 S 审」）即可手动覆盖。
 
 ### 依赖
 
 - **必需**：Claude Code 的 Agent / SendMessage 工具（subagent 派工与复用）。
-- **可选，有则用、无则降级**：多模型交叉审核 skill（M/L 档互审）、专用审查 agent、自动化测试与 lint 闸门、P4 checkout skill、Codex CLI（`codex login` 后外援可用；不可用时全部由 Claude agent 承担并明告用户）。
-- Codex 外援脚本假定 Windows + PowerShell 5.1 环境。
+- **可选，有则用、无则降级**：专用审查 agent、自动化测试与 lint 闸门、P4 checkout skill、Codex CLI（`codex login` 后外援可用；不可用时全部由 Claude agent 承担并明告用户）。
+- Codex 外援脚本假定 Windows + PowerShell 5.1 环境，并刻意保持纯 ASCII：Windows PowerShell 5.1 会把无 BOM 的 `.ps1` 按 ANSI 代码页解码，脚本里的非 ASCII 字面量在解析期就会变成乱码——所以 prompt 契约的正文放在 `contracts/*.md`，由脚本以显式 UTF-8 读回。
 
 ## 文件结构
 
 | 文件 | 说明 |
 |---|---|
 | `SKILL.md` | 技能主体：PM 契约、档位自动挡、任务板、拆分派工、质量闭环、交付收口、长程节奏 |
-| `references/convergence.md` | 收敛回路细则（预扫描清单、review 视角清单、完成报告模板），只在跑到对应环节时读 |
-| `scripts/codex-dev.ps1` | 以开发者身份跑一轮非交互 Codex CLI（默认只读，`-AllowWrite` 按包放开写权限） |
+| `references/convergence.md` | 收敛回路细则（预扫描清单、review 视角清单、交叉收敛的 prompt 骨架与归并工作表、codex 派单 prompt 骨架、完成报告模板），只在跑到对应环节时读 |
+| `schemas/review-findings.schema.json` | 两侧 Round 0 必须产出的形状：带证据、根因、根因归属层与具体改法的 findings |
+| `schemas/review-rebuttal.schema.json` | 唯一一轮质证的形状：对每条 finding 一个表态，带证据与处置 |
+| `contracts/read-only.md` | 包无写权限时，wrapper 注入 codex prompt 顶部的只读契约 |
+| `contracts/write.md` | 可改文件的包用的写契约——只许动独占清单，别的一律禁止 |
+| `scripts/codex-fleet.ps1` | 按一份 manifest 并行跑多个 codex 包，一包一独立输出目录；`-Status` 轮询，`-Collect` 在全队收工后把产物搬进来 |
+| `scripts/codex-dev.ps1` | 跑一轮非交互 Codex CLI（访问档逐包定：真只读沙箱 / 绕沙箱 + 只读契约 / 写权限） |
 | `scripts/codex-window-runner.ps1` | 被 codex-dev.ps1 拉起，在可视终端窗口里直播 codex exec 过程（不手动调用） |

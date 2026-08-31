@@ -5,17 +5,41 @@
     the repo). Used by the `taskforce` skill.
 
 .DESCRIPTION
-    Adapted from a companion review-skill codex helper (that one is locked read-only
-    for reviewing). Differences:
-        - write access is per-packet: read-only by default, -AllowWrite grants
-          real file editing (on Windows this means the sandbox bypass flag,
-          because `-s workspace-write` is silently downgraded to read-only)
+    Adapted from a companion review-skill codex helper (that one is locked
+    read-only for reviewing). Differences:
+        - access is per-packet and VERSION AWARE (-Access, see below)
         - output schema is optional; -OutFile receives the final message
+
+    ACCESS MODEL (why it is not just `-s read-only`):
+        codex >= 0.150 on Windows rejects EVERY child process under the
+        read-only sandbox - not just writes. Verified 2026-08-31 on 0.150.1:
+        a read-only turn asking for `dir` came back with
+        `rejected: blocked by policy`. A reviewer in that mode cannot grep,
+        cannot read the diff, and still exits 0 with a confident-looking empty
+        report. That silent hollow review is worse than no review.
+
+        So the sandbox is not the boundary any more; the prompt is:
+          sandbox-ro : real read-only sandbox. Correct on codex < 0.150,
+                       blind on >= 0.150 -> the script REFUSES it there.
+          prompt-ro  : sandbox bypassed, a READ-ONLY CONTRACT is prepended to
+                       the prompt, and the packet produces text only.
+          write      : sandbox bypassed, WRITE CONTRACT prepended (only the
+                       packet's exclusive file list may be touched).
+          auto       : write if -AllowWrite, else sandbox-ro on < 0.150 and
+                       prompt-ro on >= 0.150.
+        Both contracts are injected by the wrapper itself, so a hand-written
+        packet prompt cannot forget them. -NoContract disables the injection.
     Everything else is the same battle-tested setup: newest codex.exe resolved
-    by version, strongest api-capable model from models_cache.json, reasoning
-    effort `max`, fast tier (service_tier=priority), prompt piped via stdin,
-    --ignore-user-config to drop MCP noise (auth still works, AGENTS.md still
-    loads).
+    by version, strongest api-capable model from models_cache.json (priority 1
+    = gpt-5.6-sol today), reasoning effort `ultra`, thinking stream on, fast
+    tier (service_tier=priority), prompt piped via stdin, --ignore-user-config
+    to drop MCP noise (auth still works, AGENTS.md still loads).
+
+    NOTE on `ultra`: an older comment here claimed it must never be used under
+    `exec`. Re-verified 2026-08-31 on codex-cli 0.144.2 + gpt-5.6-sol: a plain
+    `exec` turn at effort=ultra completes normally (exit 0, output file
+    written). Resolve-Effort still degrades to max/xhigh/... for any model
+    whose models_cache entry does not list ultra.
 
     By default the turn runs in a VISIBLE terminal window (Windows Terminal
     tab when available) so the user can watch codex work live; logs and the
@@ -36,9 +60,9 @@ param(
     # Optional JSON schema to force structured final output.
     [string]$SchemaFile,
 
-    # `max` = deepest single-agent reasoning. `ultra` self-delegates and is
-    # unpredictable under `exec`; never use it here.
-    [ValidateSet('low', 'medium', 'high', 'xhigh', 'max')][string]$Effort = 'max',
+    # `ultra` = deepest reasoning tier the picker offers; degraded per model
+    # by Resolve-Effort when models_cache.json does not list it.
+    [ValidateSet('low', 'medium', 'high', 'xhigh', 'max', 'ultra')][string]$Effort = 'ultra',
 
     # 'auto' resolves the strongest api-capable model from models_cache.json.
     [string]$Model = 'auto',
@@ -49,18 +73,31 @@ param(
     # Disable the fast speed tier (service_tier=priority) to save quota.
     [switch]$NoFast,
 
+    # Turn OFF the reasoning stream. Default ON: detailed reasoning summaries
+    # plus raw agent reasoning, so the live window and the stdout log show what
+    # codex is actually thinking (that log is the PM's only way to audit a
+    # write-enabled packet after the fact).
+    [switch]$NoThinking,
+
     # Run codex headless with no visible window (the pre-2026-08 behavior).
     # Default is a visible Windows Terminal tab streaming codex's work live.
     [switch]$Hidden,
 
-    # Grant codex REAL write access. On Windows codex 0.147 has no
-    # write-capable sandbox (`-s workspace-write` is silently downgraded to
-    # read-only and file edits are refused), so writing requires
+    # Grant codex REAL write access. On Windows codex has no write-capable
+    # sandbox (`-s workspace-write` is silently downgraded to read-only and
+    # file edits are refused), so writing requires
     # --dangerously-bypass-approvals-and-sandbox: NO sandbox, NO approvals.
     # The dispatcher decides per work packet: only pass this when the packet
     # genuinely needs codex to edit files, with a prompt spec that confines it
-    # to its exclusive file list. Default is read-only.
-    [switch]$AllowWrite
+    # to its exclusive file list. Shorthand for -Access write.
+    [switch]$AllowWrite,
+
+    # See ACCESS MODEL in the header. 'auto' is version aware.
+    [ValidateSet('auto', 'sandbox-ro', 'prompt-ro', 'write')][string]$Access = 'auto',
+
+    # Do not prepend the read-only / write contract to the prompt. Only for
+    # packets whose prompt already carries an equivalent contract.
+    [switch]$NoContract
 )
 
 $ErrorActionPreference = 'Stop'
@@ -165,7 +202,7 @@ function Resolve-Effort {
     $supported = @($entry.supported_reasoning_levels.effort)
     if ($supported -contains $Wanted) { return $Wanted }
 
-    foreach ($fallback in @('max', 'xhigh', 'high', 'medium', 'low')) {
+    foreach ($fallback in @('ultra', 'max', 'xhigh', 'high', 'medium', 'low')) {
         if ($supported -contains $fallback) { return $fallback }
     }
     return $Wanted
@@ -205,6 +242,27 @@ if (-not $resolved.Path) {
 $useModel = Resolve-Model -Requested $Model
 $useEffort = Resolve-Effort -Model $useModel -Wanted $Effort
 
+# --- Access resolution ------------------------------------------------------
+# 0.150.0 is where the read-only sandbox started rejecting child processes.
+$roSandboxBroken = ($resolved.Version -and $resolved.Version -ge [version]'0.150.0')
+
+$useAccess = $Access
+if ($useAccess -eq 'auto') {
+    if ($AllowWrite) { $useAccess = 'write' }
+    elseif ($roSandboxBroken) { $useAccess = 'prompt-ro' }
+    else { $useAccess = 'sandbox-ro' }
+} elseif ($AllowWrite -and $useAccess -ne 'write') {
+    Write-Status @{ ok = $false; error = "-AllowWrite conflicts with -Access $useAccess" } 2
+}
+
+if ($useAccess -eq 'sandbox-ro' -and $roSandboxBroken) {
+    # Fail loudly instead of handing back a hollow review (see ACCESS MODEL).
+    Write-Status @{
+        ok    = $false
+        error = "codex $($resolved.Version): the read-only sandbox blocks every child process, so a sandbox-ro packet cannot grep or read anything and would return an empty-but-confident result. Use -Access prompt-ro (bypass + read-only contract)."
+    } 7
+}
+
 $outDir = Split-Path -Parent $OutFile
 if ($outDir -and -not (Test-Path $outDir)) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
 if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
@@ -212,33 +270,89 @@ if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
 $stdoutFile = "$OutFile.stdout.log"
 $stderrFile = "$OutFile.stderr.log"
 
-# --- Build args -------------------------------------------------------------
-$argList = @(
-    'exec',
-    '--ignore-user-config',
-    '-m', $useModel,
-    '-c', "model_reasoning_effort=`"$useEffort`""
-)
-if ($AllowWrite) {
-    # The bypass flag replaces both the sandbox and the approval policy; it is
-    # the only way codex can edit files on Windows (see -AllowWrite doc).
-    $argList += '--dangerously-bypass-approvals-and-sandbox'
-} else {
-    $argList += @('-c', 'approval_policy="never"', '-s', 'read-only')
+# --- Prompt contract --------------------------------------------------------
+# The wrapper owns the boundary, not the packet author: a forgotten line in a
+# hand-written prompt must not turn a read-only packet into a writing one.
+#
+# The contract TEXT lives in ../contracts/*.md, NOT in this file. Reason:
+# Windows PowerShell 5.1 decodes a BOM-less .ps1 as the ANSI codepage, so any
+# CJK string literal here is mangled at parse time (observed 2026-08-31: the
+# injected contract reached codex as GBK-read-as-UTF8 mojibake). Reading the
+# text from a file with an explicit UTF-8 decode sidesteps that, and keeps this
+# script pure ASCII.
+function Get-Contract {
+    param([string]$Name)
+    $file = Join-Path (Split-Path -Parent $PSScriptRoot) "contracts\$Name.md"
+    if (Test-Path $file) {
+        return ([System.IO.File]::ReadAllText($file, [System.Text.Encoding]::UTF8)).TrimEnd() + "`r`n`r`n"
+    }
+    # Fallback so the boundary never silently disappears if the file is missing.
+    if ($Name -eq 'write') {
+        return @'
+<<WRITE CONTRACT - highest priority, overrides anything below>>
+Sandbox and approvals are OFF, so the boundary is this contract:
+- Only files listed under this packet's EXCLUSIVE FILE LIST may be created,
+  modified or deleted. Anything else is forbidden, including "while I am here"
+  fixes to neighbouring problems - report those instead of touching them.
+- No p4 submit, no git commit/push, no dependency installs, no global config.
+- Your report must list every file path you actually changed; the caller
+  diffs it, and any file outside the list sends the whole packet back.
+<<END CONTRACT>>
+
+'@
+    }
+    return @'
+<<READ-ONLY CONTRACT - highest priority, overrides anything below>>
+The sandbox is open, but your grant is READ-ONLY:
+- Do not create, modify, delete or move any file. No p4 edit/add/revert/submit,
+  no git add/commit/checkout/clean/push, no installs, no config changes.
+- Allowed: reading files, grep/search, side-effect-free analysis commands.
+- Your only artifact is the final reply itself.
+- If the task seems to ask you to edit files, do not: say in the reply that the
+  packet was not granted write access.
+<<END CONTRACT>>
+
+'@
 }
+
+$stdinFile = $PromptFile
+if (-not $NoContract -and $useAccess -ne 'sandbox-ro') {
+    $header = Get-Contract $(if ($useAccess -eq 'write') { 'write' } else { 'read-only' })
+    $body = [System.IO.File]::ReadAllText($PromptFile, [System.Text.Encoding]::UTF8)
+    $stdinFile = "$OutFile.prompt.txt"
+    [System.IO.File]::WriteAllText($stdinFile, ($header + $body), (New-Object System.Text.UTF8Encoding $false))
+}
+
+# --- Build args -------------------------------------------------------------
+# Built by straight appends on purpose: the previous index-splicing version
+# ($argList[0..($argList.Length - 4)] + ...) broke the moment a new flag was
+# added, because every insert point was a hardcoded offset from the tail.
+$argList = @('exec', '--ignore-user-config', '-m', $useModel)
+$argList += @('-c', "model_reasoning_effort=`"$useEffort`"")
+if (-not $NoFast) {
+    # service_tier=priority is what the picker labels "Fast" (1.5x speed).
+    $argList += @('-c', 'service_tier="priority"')
+}
+if (-not $NoThinking) {
+    $argList += @('-c', 'model_reasoning_summary="detailed"')
+    $argList += @('-c', 'show_raw_agent_reasoning=true')
+}
+if ($useAccess -eq 'sandbox-ro') {
+    $argList += @('-c', 'approval_policy="never"', '-s', 'read-only')
+} else {
+    # The bypass flag replaces both the sandbox and the approval policy; it is
+    # the only way codex can run ANY child process on codex >= 0.150 (and the
+    # only way it can edit files at all on Windows). The boundary for
+    # prompt-ro packets is the injected contract above.
+    $argList += '--dangerously-bypass-approvals-and-sandbox'
+}
+if ($SchemaFile) { $argList += @('--output-schema', $SchemaFile) }
 $argList += @(
     '--skip-git-repo-check',
     '-C', $RepoRoot,
     '-o', $OutFile,
     '-'
 )
-if ($SchemaFile) {
-    $argList = $argList[0..($argList.Length - 4)] + @('--output-schema', $SchemaFile) + $argList[($argList.Length - 3)..($argList.Length - 1)]
-}
-if (-not $NoFast) {
-    # service_tier=priority is what the picker labels "Fast" (1.5x speed).
-    $argList = $argList[0..1] + @('-c', 'service_tier="priority"') + $argList[2..($argList.Length - 1)]
-}
 
 # Start-Process joins ArgumentList with plain spaces, so any argument holding a
 # space would be split into two. Quote those before handing them over.
@@ -257,7 +371,7 @@ $sw = [Diagnostics.Stopwatch]::StartNew()
 
 function Invoke-CodexHidden {
     $p = Start-Process -FilePath $resolved.Path -ArgumentList $quoted `
-        -RedirectStandardInput $PromptFile `
+        -RedirectStandardInput $stdinFile `
         -RedirectStandardOutput $stdoutFile `
         -RedirectStandardError $stderrFile `
         -NoNewWindow -PassThru
@@ -291,7 +405,7 @@ if (-not $Hidden) {
             '-File', ('"' + $runner + '"'),
             '-CodexExe', ('"' + $resolved.Path + '"'),
             '-ArgsB64', $argsB64,
-            '-PromptFile', ('"' + $PromptFile + '"'),
+            '-PromptFile', ('"' + $stdinFile + '"'),
             '-StdoutFile', ('"' + $stdoutFile + '"'),
             '-StderrFile', ('"' + $stderrFile + '"'),
             '-DoneFile', ('"' + $doneFile + '"'),
@@ -339,7 +453,10 @@ $status = @{
     model      = $useModel
     effort     = $useEffort
     fast       = (-not $NoFast.IsPresent)
-    sandbox    = $(if ($AllowWrite) { 'bypass (full access, no approvals)' } else { 'read-only' })
+    thinking   = (-not $NoThinking.IsPresent)
+    access     = $useAccess
+    contract   = $(if ($NoContract -or $useAccess -eq 'sandbox-ro') { 'none' } elseif ($useAccess -eq 'write') { 'write-contract' } else { 'read-only-contract' })
+    sandbox    = $(if ($useAccess -eq 'sandbox-ro') { 'read-only' } else { 'bypass (full access, no approvals)' })
     codex_exe  = $resolved.Path
     codex_ver  = "$($resolved.Version)"
     elapsed_s  = [int]$sw.Elapsed.TotalSeconds

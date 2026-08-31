@@ -1,0 +1,105 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings", "summary"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "description": "One entry per problem. Empty array means no blockers found.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "severity",
+          "file",
+          "line",
+          "claim",
+          "evidence",
+          "root_cause",
+          "pre_existing",
+          "confidence",
+          "fix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable id inside this report, e.g. F1, F2."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["BLOCK", "WARN", "INFO"]
+          },
+          "file": {
+            "type": "string",
+            "description": "Repo-relative path."
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-indexed line the finding anchors to; 0 if not line-anchored."
+          },
+          "claim": {
+            "type": "string",
+            "description": "One sentence: what is wrong. No restating of the diff."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "<=1 line of concrete evidence (quoted code, call site, failing input -> wrong output)."
+          },
+          "root_cause": {
+            "type": "string",
+            "description": "The cause that produces the symptom, not the place the symptom shows up."
+          },
+          "pre_existing": {
+            "type": "boolean",
+            "description": "true = the defect exists independently of this diff. Pre-existing defects are INFO at most, UNLESS this change is what makes them wrong."
+          },
+          "confidence": {
+            "type": "number",
+            "description": "0..1 confidence that this is a real defect."
+          },
+          "fix": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["layer", "files", "how", "risk"],
+            "properties": {
+              "layer": {
+                "type": "string",
+                "enum": ["code", "config-table", "asset", "proto", "third-party", "spec"],
+                "description": "Which layer owns the root cause. config-table => the table owner edits the source sheet and re-exports; asset => the asset owner edits the prefab; never compensate downstream."
+              },
+              "files": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Files the fix should touch."
+              },
+              "how": {
+                "type": "string",
+                "description": "Concrete instruction: what to change and to what. Root-cause fix only - no nil guards, try/catch, special-case branches or compensating calls that mask the symptom."
+              },
+              "risk": {
+                "type": "string",
+                "description": "What this fix could break, and what must be re-checked after it."
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block", "warn", "info", "verdict"],
+      "properties": {
+        "block": { "type": "integer" },
+        "warn": { "type": "integer" },
+        "info": { "type": "integer" },
+        "verdict": {
+          "type": "string",
+          "enum": ["NO_BLOCKERS", "BLOCKERS"],
+          "description": "NO_BLOCKERS only when block == 0."
+        }
+      }
+    }
+  }
+}
