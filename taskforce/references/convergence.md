@@ -24,7 +24,8 @@ grep/Glob 就能查、且**最常漏**的四类。能当场补的当场补（算
 ## 2. review 视角清单（SKILL.md §5.1）
 
 **S 档：四个视角写进同一份 prompt 给一个 reviewer**，不各开一个 agent。
-M/L 档由双引擎交叉审核提供多 agent 视角，这份清单作为其审查要点补充。
+M/L 档走 SKILL.md §5.1 的双引擎（Claude reviewer + codex 编队 `role=review`），这份清单是各视角的 prompt 要点；
+通用的交叉审核 skill 只在用户显式要求时用。
 
 | 视角 | prompt 要点（对抗式，不给实现推理） |
 |---|---|
@@ -106,6 +107,7 @@ B1  source=autotest|lint|compile|correctness|rules|requirements|rootcause
 - 升级类结论的未解 blocker + 试过哪些策略
 
 ### 交付
+- 工作区：<形态> / client=<P4CLIENT> / 根=<工作区根>（CoW worktree 形态按 client 分列 CL）
 - Changelist: {CL号}（**pending，未 submit**）
 - 归入文件: 新增 N / 修改 M / 删除 K（含 .meta）
 - 下一步: 复核 diff 后由你 submit
@@ -138,7 +140,7 @@ codex 侧由 `codex-fleet.ps1` 的 packet `schemaFile` 强制；Claude 侧把 sc
 每条 finding 必须给出「处理建议 + 处理方式」，缺 fix 的条目不算 finding：
 - root_cause：引发症状的原因，不是症状出现的位置
 - fix.layer：根因归属层 code / config-table / asset / proto / third-party / spec
-  （配表错 → 转配表负责人改源表重导；资产错 → 转资产负责人；禁止在下游层补偿上游层的错误）
+  （配表错 → 转策划改 Excel 重导；资产错 → 转 UE；禁止在下游层补偿上游层的错误）
 - fix.how：具体到「改哪个文件的哪里、改成什么」。禁止 nil 守卫 / try-catch 吞错 /
   特例分支 / 补偿调用这类掩盖症状的写法
 - fix.risk：这个改法可能破坏什么、改完要复验什么
@@ -198,8 +200,8 @@ verifier 的结论是**终局**，两侧都不再表态——这是"不各说各
 <做什么、不做什么>
 
 ## 独占文件清单（只许改这些，其它一律禁止创建/修改/删除）
-- <路径/模块A/...>
-- <路径/模块B/...>
+- Binary/Src/...
+- Assets/Script/...
 
 ## 接缝（本包拥有 / 消费的行，抄自任务板接缝登记表）
 | # | 接缝 | 两端 | owner | 契约 | 机判验证 |
@@ -211,7 +213,7 @@ verifier 的结论是**终局**，两侧都不再表态——这是"不各说各
 <task-dir>/packets/recon.md   ← 先读它，不要从零重探
 
 ## 硬约束
-- 遵守项目 CLAUDE.md 与 .claude/rules/*（编码规范、目录禁区、文件编码与换行约定）
+- 遵守项目 CLAUDE.md 与 .claude/rules/*（编码规范、目录禁区、UTF-8 无 BOM + CRLF）
 - 根因优先：禁 nil 守卫 / try-catch 吞错 / 特例分支 / 补偿调用掩盖问题
 - 数据缺失不假设：字段/配表行/资源不存在 → 空实现 + TODO 并回报，不编造来源
 - 移植类需求不自创绕过：缺依赖继续从源头移植
@@ -228,3 +230,55 @@ wrapper 会在这份 prompt 顶部自动注入写契约或只读契约（`codex-
 
 收包时按 SKILL.md §4.7 的五条复核表逐项过；`stdout.log` / `stderr.log` 里的 thinking 流
 是写权限包唯一的事后审计材料，越界动作会留在那里。
+
+---
+
+## 7. 运行时验证 agent（SKILL.md §5.5）
+
+### 7.1 派工 prompt 骨架（每片一个 agent、一次 Play 会话）
+
+```
+# 运行时验证 <片 id>：R<a>–R<b>（≤ 8 条，只跑跨包链路；包内断言已在各包冒烟里跑过）
+
+## 前置
+- Editor 绑定（SKILL.md §3）：cwd 在本工作区内；先 `editor-cli verify-project pattern=<本 worktree 目录名>`，dataPath 不匹配立即停止并回报
+  `WRONG_PROJECT`；本工作区 Editor 未开 → 全部条目记 `UNVERIFIED-EDITOR` 回报，不借别的 worktree 的 Editor。
+- 遵守项目的运行时 probe 规范（语法先做静态检查、不确定 API 先 pcall、一次 probe 一个假设）。
+- 增量落盘：**每条 R 项出结果立即追加**到 `packets/<wp>-report.md`（含 PASS/FAIL、一行证据、截图路径），
+  不攒到最后——你可能被 session limit 中途杀掉。
+
+## 条目
+R<n>：<当<条件>，系统应<行为>>  验证手段：<editor-cli 命令 / 自动化测试用例 / lua probe>  证据：<截图 / 返回值 / log 关键字>
+
+## 缺陷处理（一票否决）
+发现 FAIL 时**不要停在症状**，在同一 Play 会话内完成后再写记录：
+1. 用真实调用路径复现 ≥ 2 次（真按钮 / 真 handler 注册表 / 真事件），并排除 probe 自身的调用约定差异
+   （先查 handler 是怎么注册、怎么被真实调用方调用的，再按同样方式调）；
+2. probe 出根因证据：nil 的是哪个变量、哪一层没走到、资产 meta 哪个字段、prefab 是否模块常驻、
+   谁在什么时机把值改掉；
+3. 按 §7.2 格式写入 `packets/<wp>-defects.md`。**只报症状不报根因的缺陷 PM 不派修。**
+
+## 回报契约（≤30 行）
+PASS/FAIL 计数、FAIL 项 id、缺陷记录路径、Play 起止时刻、Editor 登记是否已改回、未跑项及原因。
+```
+
+### 7.2 缺陷记录格式（`packets/<wp>-defects.md`，每条一段）
+
+```
+D-<n>  R<item>  status=OPEN | FIXED | DISMISSED
+症状：<一句>
+复现：真实路径 <按钮 / handler / 事件> ×<次数>；probe 路径差异已排除（<怎么排除的>）
+根因：<变量 / 层 / 资产字段>    证据：<≤2 行：probe 输出 / meta 字段 / 调用链>
+归属层：code | config-table | asset | proto | spec（见所在项目的修复归属层级规范）
+建议改法：<改哪个文件的哪里、改成什么>    复测项：R<item>（+ 直接相关 R<k>）
+修复轮次：<n>    ← 第 2 轮复测仍 FAIL 即停止派修，转 §5.2 verifier 实证；不许第 3 次盲修
+```
+
+**PM 派修时把整段附给 dev agent**；dev 的修复回报必须引用「根因 / 证据」两行，只写"我改了 X"不算。
+`DISMISSED` 必须写清是 probe 自身问题还是既有噪音（如开发服未开表情的 `Up_Emoji module frozen`），
+并在 SKILL.md §6 报告「待关注」里保留一行。
+
+> 实证 2026-09-01：D-5（emoji 面板）三轮修复分别改了 AddSubView / Find 根节点 / checkModuleStep，
+> 前两轮都是 dev 读码猜的，每轮烧一次 Play 复测；D-4（驻防面板"首开崩"）是验证 agent 用
+> `func(H, params)` 调了按 `func(params)` 注册的 handler 造出的假缺陷，派修 → 复测 → 撤回。
+> 两条加起来 ≈ 1 小时墙钟，都可在现场多 probe 两次省掉。

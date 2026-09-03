@@ -5,8 +5,8 @@
     the repo). Used by the `taskforce` skill.
 
 .DESCRIPTION
-    Adapted from a companion review-skill codex helper (that one is locked
-    read-only for reviewing). Differences:
+    Adapted from a companion review skill's codex helper (that one is locked read-only
+    for reviewing). Differences:
         - access is per-packet and VERSION AWARE (-Access, see below)
         - output schema is optional; -OutFile receives the final message
 

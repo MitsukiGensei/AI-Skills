@@ -49,6 +49,12 @@
     schemaFile, timeoutSec (default 3600), outDir (default: per-role, below),
     repoRoot (default: manifest repoRoot).
 
+    repoRoot MUST be the absolute path of the checkout the PM session is
+    running in. With 池化 worktree / CoW worktrees several checkouts of the same
+    stream coexist on one machine (each its own P4 client, resolved via the
+    .p4config under that root), so never copy repoRoot from another task's
+    manifest - codex would edit files in a different client.
+
 .EXAMPLE
     # launch (from Bash with run_in_background:true)
     .\codex-fleet.ps1 -Manifest .taskforce\slug\codex\fleet-wave1.json

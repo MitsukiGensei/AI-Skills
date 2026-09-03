@@ -1,6 +1,6 @@
 ---
 name: taskforce
-version: 1.2.0
+version: 1.5.0
 description: TaskForce 是一个把「需求」推进到「可提交的 P4 pending changelist」的任务落地引擎。主会话的 AI 只处理 定档、拆包、并行派工、仲裁、验收；写代码的是按复杂度分级的 subagent（Claude Sonnet / Opus / Fable + 多个并行 Codex CLI agent，codex 既承接开发派单也承接独立审核，主 agent 复核）。自动、独立 review 收敛，质量有保障。全程状态外置到任务板文件，扛得住高频上下文压缩。当用户提到 taskforce、落地需求、把这个功能做完、新需求实现、长程任务、大需求落地、项目经理模式、拆任务并行开发、多 agent 协作开发、组一个开发小队、让 codex 一起干、或要对已有改动做独立 review 收敛验证时触发。即使用户只说"帮我把这个需求做了"或"这个需求很大，帮我组织人手"，只要意图是把一个需求实施到可交付并闭环质量，都应触发此 skill。
 ---
 
@@ -19,11 +19,14 @@ description: TaskForce 是一个把「需求」推进到「可提交的 P4 pendi
 |---|---|---|
 | **完整**（默认） | 给了需求（文档路径 / 链接 / 一句话描述） | §2 定档 起全程 |
 | **收敛验证**（`--verify`） | 改动**已做好**（手改、调试 skill 修完、别的工具产出） | 跳过 §2–§4，直接进 §5 review 收敛 + §6 收口 |
+| **交接**（`args=<交接单路径>`） | 另一 skill 已完成分析 / 侦察并产出交接单（如 `profiler-analysis` Step 5 的 `perf-handoff.md`） | §2 定档以交接单「建议任务档」为起点（换挡触发器照常生效）；§4.1.0 钉需求 = 把交接单的验收标准 / 明确不做搬进任务板、向用户确认一次；§4.1.1 recon 复用交接单附件（`packets/`）不重探；交接单「收口约束」（如每包独立 CL）**高于** §6.2 默认 |
+
+交接模式下调用方是 P4 团队 skill、本 skill 是 user 级：调用方必须自带降级链（无 taskforce 时走 `/dev` 或自身最小闭环），本 skill 不反向依赖调用方。
 
 `--verify` 的审查目标 = 当前未提交改动（`p4 opened` / `git diff`）；无新功能验收标准时
 收敛标准重定义为「客观闸门全绿（含原本失败的用例现在通过）+ 无回归 + 根因修复非打补丁」。
 它对"谁改的"不可知，所以能接手任何来源的改动；调试 skill 修完要不要接力由用户定，
-**两个 skill 不互相内联**（团队受控 skill 硬调 user 级 skill 会让别人 sync 后引用到不存在的东西）。
+**两个 skill 不互相内联**（调试 skill 是团队受控 skill，硬调 user 级 skill 会让别人 sync 后引用到不存在的东西）。
 
 ---
 
@@ -50,6 +53,11 @@ description: TaskForce 是一个把「需求」推进到「可提交的 P4 pendi
   独立 review，**不因为它是 gpt 最强档就加权或跳检**（复核清单见 §4.7）。
   同样地，codex 的审核结论也不天然压过 Claude 侧结论——两侧都只有证据算数（§5.2）。
 - **能并行的调用必须放在同一条消息里发出**。串行派工 = 白等一倍时间。
+- **PM 只在本工作区内活动**：一切读写限于当前工作区根（含 `.taskforce/`）、`~/.claude/taskforce/` 与 scratchpad。
+  **禁止**读写其他 CoW worktree / 原始 workspace / 其他项目目录下的 `.taskforce/`、memory、源码（实证见 evidence.md §3.2 第 7 条）。
+  要用旧产物 → 用户显式给路径，或用户自己拷进本工作区。
+- **PM 上下文有预算**：单次工具回显 ≤ 60 行（超了先 `| head` / `wc -l` / 落文件再读摘要）、不 `cat` 源码、
+  任务板用 Edit 定点改而非整篇重写、派工 prompt 给路径不贴正文、`SendMessage` 一事一句。 实证见 evidence.md §3.2 第 2 条。
 - **PM 的模型在开工时定死**（会话中 agent 无法自行切档，`/model` 是用户命令）：
   架构判断密集的任务 → 建议用户以 **fable** 开 PM 会话（PM 可亲自裁决设计方案）；
   架构已定、以铺量实施为主 → **opus** 足矣（罕见的设计裁决派 fable agent）。
@@ -81,17 +89,31 @@ description: TaskForce 是一个把「需求」推进到「可提交的 P4 pendi
 任一「直接 ≥M/L」触发即取高档；否则按文件数主信号定。**拿不准取高一档**——
 降档随时可做且免费，升档要返工。
 
+**范围先于档位（一句话需求 / 用户不在场时的一票否决）**：档位只回答"怎么审"，不回答"做多少"。
+一句话需求（"把 X 挪过来""把这个文档做完"）先写出**最小可交付（MVP）**的验收标准——用户看到
+就能用的最小闭环——并把所有超出 MVP 的项（三方合并 / 恢复历史删除项 / 顺手修的既有 bug /
+文档全量逐条）列进任务板「待用户裁决 · 扩展项」。用户不在场时**按 MVP 推进**，扩展项默认不做；
+「最保守解释」指**范围最小**的解释，不是"把所有可能相关的都做上"。
+L 档只在两种情况成立：需求文档 / 交接单本身明示了全量范围，或用户对扩展项点了头。
+实证见 evidence.md §2 v1.3.0（2026-09-01 两个一句话需求被自动展开成 L 档，3h+ / 5h+，用户评价"很简单的任务跑了很久"）。
+
+**审计型需求恒两段式（一票否决）**：需求形如「拆解策划案 → 逐条验证 → 查漏补缺（→ checkout）」时，它是**两个任务**：
+① 审计——只派 `Explore` recon + PM 合成 `packets/audit-matrix.md`（每条功能项 DONE / PARTIAL / MISSING / N-A + 证据 file:line
++ 归属层），**把矩阵交给用户后停下**；② 实施——用户从矩阵里勾选要做的项（或说"全做"），再按勾选范围定档拆包。
+不许把 ① 的产物直接当 ② 的派工单一口气跑完：矩阵本身就是用户最想先看到的交付物，而全量实施是最贵的路径
+（实证 evidence.md §3）。
+用户在需求里明说"不用确认、直接做完"才跳过停顿，且仍先落矩阵。
+
 **档位决定 review 强度与编排开销，不决定并行度。** 并行度由任务形状决定：能由一个
 opus agent 一次会话完成的活不派第二个——每多一个 agent 付一次入职（读任务板 / recon /
-接缝表），而闲置或规格薄的 agent 是团队里最吵的（UCL 2026：8 人队里 4 个无规格 agent
-发了 62% 的消息）。
+接缝表），而闲置或规格薄的 agent 是团队里最吵的（evidence.md §1 第 2 条）。
 
 ### 2.2 档位链路
 
 | 档 | 链路 |
 |---|---|
 | **S 轻量** | 钉验收标准 → 一个 dev agent 实现（不开 recon、不建 packets）→ 自跑预扫描+闸门 → **1 个 reviewer 单审** → 修 → 收口。**无波次、无交叉审核、无确认轮** |
-| **M 常规** | recon 一次 → 分包并行 → 闸门 → 双引擎交叉审核（1 轮）→ 争议实证分流 → 定性派修 → 收口 |
+| **M 常规** | recon 一次 → 分包并行 → 闸门 → 通用交叉审核 skill 跑 1 轮 → 争议实证分流 → 定性派修 → 收口 |
 | **L 长程** | M 的全套 + 多波调度 + codex 外援 + 终验跨包集成审视 + 确认轮（单个 completeness-critic） |
 
 ### 2.3 换挡触发器（客观，不凭感觉）
@@ -116,22 +138,18 @@ opus agent 一次会话完成的活不派第二个——每多一个 agent 付�
 **恒高于自动判据**，记进任务板备注；此后自动升档触发器仍生效，
 **降档触发器失效**（不许把用户的指定悄悄降回去）。
 
-### 2.4 并行度纪律（多 agent 真并行的七条防线）
+### 2.4 并行度纪律（七条防线，每开一个新 agent 前自查）
 
-真并行是本引擎的产能来源，也是它最容易自毁的地方。下表左列是 UCL 2026
-（arXiv 2608.16801，1902 次评分运行 + 244 次密封复现，模型钉死 sonnet-4-6）实测到的
-结构性失效，右列是本 skill 里对应的**机制**——不是提醒，是流程里必须踩到的那一步。
-**每开一个新 agent（Claude 或 codex）前，把右列自查一遍。**
+依据 UCL 2026（arXiv 2608.16801，1902 次评分运行 + 244 次密封复现）七条实测失效模式，本 skill 的对应**机制**
+（不是提醒，是流程里必须踩到的那一步；实测数字与出处见 [references/evidence.md](references/evidence.md) §1）：
 
-| 失效模式（实测） | 数字 | 本 skill 的防线 |
-|---|---|---|
-| **接缝无主则断** | 8 步链：2/4 人 9/10 成功，8 人 **0/10**；10 次运行**每次都讨论了**舍入约定、**每次都没解决** | 接缝登记表每条恰好一个 owner；M/L 档波次 1 派工前登记表为空 = 不许派工（§4.1.3） |
-| **薄规格 / 闲置 agent 是通信噪声源** | 8 人分布式里 4 个没拿到规格的 agent 发了**全队 62%** 的消息（13.7 vs 8.4 条/人） | 宁少勿闲：规格写不满的包并入相邻包；每个 agent 必须持有完整包规格 + 它拥有/消费的接缝行（§4.4.5） |
-| **"协调者"头衔不产生领导力** | 冲突拆分成功率：4 人协调者 8/10 vs 扁平 12/20（p=0.42）；8 人扁平持平或更好；密封复现同样为零效应 | PM 的作用力来自**拆解与登记表**，不来自头衔：矛盾靠 oracle 裁定后写进契约列（§4.1.1），不靠"我是 PM"喊话 |
-| **文件通道的收益是有条件的** | 分布式任务强制文件：output token −42%、消息 134→26；**链式任务反而 +10~17%** | taskforce 本就是链式 + file-first，**因此不再叠加任何新的文件纪律**（§4.1.3）；只有当任务形状是"知识被切碎给多人"时才加文件通道 |
-| **够得着的路径就会被够** | 密封复现：80% 打开诱饵测试文件、66% 翻别人的 prompt、61% 读清单——**prompt 里没让它们这么做** | 双引擎评审物理隔离：codex 编队一包一独立目录，review/design 产物默认落任务目录**之外**，全队收工后才 `-Collect`（§4.6 / §5.1） |
-| **加人不等于加产能** | 16 人与 8 人消息量持平（47.0 vs 46.8，斜率 0.00）；链式 16 人平均度只有 0.28 | 每波在跑 agent ≤ 6（含 codex）；并行度由**任务形状**决定而非档位；顺序因果链一个 agent 端到端做完（§2.1 / §4.4.3） |
-| **单次运行 = 样本量 1** | 开放式协调格 27 格里 13 格跨会话不可复现（指数 1.76 vs 2.44）；链式格几乎完美复现 | 不从 n=1/2 推政策：投机命中率"降半"而非"连续 2 次即停"（§4.3）；失败不原样重试，先诊断再缩规格或换人（§7） |
+1. **接缝无主则断** → 接缝登记表每条恰好一个 owner；M/L 档波次 1 派工前登记表为空 = 不许派工（§4.1.3）。
+2. **薄规格 / 闲置 agent 是通信噪声源** → 宁少勿闲：规格写不满的包并入相邻包；每个 agent 持完整包规格 + 自己拥有 / 消费的接缝行（§4.4.5）。
+3. **"协调者"头衔不产生领导力** → PM 的作用力来自拆解与登记表；矛盾靠 oracle 裁定后写进契约列（§4.1.1），不靠"我是 PM"喊话。
+4. **文件通道的收益是有条件的** → taskforce 已是链式 + file-first，**不再叠加任何新的文件纪律**（§4.1.3）。
+5. **够得着的路径就会被够** → 双引擎评审物理隔离：codex 一包一独立目录，review / design 产物落任务目录**之外**，收工后才 `-Collect`（§4.6 / §5.1）。
+6. **加人不等于加产能** → 每波在跑 agent ≤ 6（含 codex），机器级 opus/fable ≤ 4（§4.2）；并行度由任务形状决定；顺序因果链一个 agent 端到端（§2.1 / §4.4.3）。
+7. **单次运行 = 样本量 1** → 不从 n=1/2 推政策：投机命中率"降半"而非"连续 2 次即停"（§4.3）；失败不原样重试，先诊断再缩规格或换人（§7）。
 
 ---
 
@@ -157,9 +175,13 @@ codex/          codex 外援的 prompt / 输出 / 日志
 ## 明确不做
 ## 基线
 开工前 `p4 opened` / `git status` 快照：<用户既有未提交改动清单>（**永不覆盖**）
-同期活动任务：<`.taskforce/_active.md` 中与本任务独占文件有交集的 slug / CL / 文件；无则写"无">
+工作区形态：<CoW worktree（独立工程） | P4 单 workspace | 仅 git> / client=<P4CLIENT> / 根=<工作区根> / git overlay=<有|无> / Library=<有|无>（§3 工作区形态探测）
+PM 锁：`.taskforce/<slug>/pm-lock.json` pid=<CLAUDE_PID>（§3 PM 单例锁）
+同期活动任务：<机器级 `_active.md`（§3 同期任务探测）中与本任务独占文件有交集的 slug / client / CL / 文件；无则写"无">
+Editor：<bound port=<8090–8100> dataPath 已验 | not-open（已请用户在本工作区开 Unity） | n/a（无 Play 需求）>    ← 本工作区自己的 Editor，不排队（§3 Editor 绑定）
 ## 波次计划
 Wave 1: WP-01, WP-02（并行） → Wave 2: WP-03（依赖 01+02）…    ← S 档留空
+在跑（每次派工前数一次）：本任务 <N>/6 含 codex，opus/fable <k>/3；机器级（`_active.md` 各行 agents 列求和）opus/fable <m>/4（§4.2 额度预算）
 ## 工作包
 | ID | 范围 | 独占文件 | 满足AC | 执行者(agent名/codex) | 模型 | 档 | 状态 | review轮次 | 备注 |
 |----|------|----------|--------|----------------------|------|----|------|-----------|------|
@@ -192,18 +214,71 @@ Wave 1: WP-01, WP-02（并行） → Wave 2: WP-03（依赖 01+02）…    ← S
 - 波次边界主动向用户提示"现在是 /compact 的安全点"；被压缩后的第一件事 = 重读任务板。
 
 **能力探测**（开跑前一次，结果记进任务板）：`p4 info` / `git status` 定版本控制；
-是否有自动化测试、lint、专用审查 agent 等配套。**有则用、无则降级**——
+是否有自动化测试 skill、lint、专用审查 agent。**有则用、无则降级**——
 降级的是"用哪套工具/规则"，**独立 review 永不降级**。
 
-**同期任务探测**（与能力探测同时做，结果写任务板"基线"区）：两个 taskforce 各管各的
-= 无消息总线、只共享仓库的独立拓扑，是误差放大最严重的形态。开工前跑三条：
-`ls -lt .taskforce/*/taskboard.md`（今天活动的兄弟任务）+ `p4 opened -a`（别的 CL 开着哪些文件）
-+ `p4 diff -f -sa`（allwrite 下未 checkout 的异动；git 项目用 `git status` 看未暂存异动）。
-然后在 `.taskforce/_active.md` 登记一行 `<slug> | <CL> | <独占文件集>`，收口时删除；
-派工前与它求交集，重叠 → 先 `SendMessage` 兄弟会话（`ListAgents` 列出）协调，再派：
-共享文件留**先开的 CL**、后 CL 描述点名；**先提交的文件不能调用只在后 CL 里新增的函数**
-（提交序）；资产缺口止血只放一处并标 `WORKAROUND`；两条任务设计走向相反时作用户裁决项、
-两边同措辞上报。
+**工作区形态探测**（能力探测的一部分；三种形态都是合法输入，结论写任务板「基线 · 工作区形态」行，
+后面 §3 同期任务探测 / §4.1.2 隔离原语 / §4.5 早锁 / §6 收口都按它分流）：
+
+| 判据（按序） | 形态 | 含义 |
+|---|---|---|
+| `p4 info` 通 **且** client root 下有工作区池工具的标记文件（各家不同：池工具专属的标记文件，或它注入的 worktree-id 环境变量非空） | **CoW worktree（独立工程）** | 本目录是工作区池工具从预热池写时复制克隆出的 worktree：**自己的 P4 client、自己的 have 表与 opened 列表、自己的 `.taskforce/`、自己的 `Library/` 与 Unity Editor**。与同机其他 worktree（golden、其他任务、原始 workspace）只共享 depot stream。P4 路由靠 client root 下的 `.p4config` 逐目录生效，cwd 在 root 内的任何 `p4` 命令都落到本 client，subagent / codex 不需额外设置；**通常没有 `.git`** |
+| `p4 info` 通，无池工具标记文件 | **P4 单 workspace** | 传统工作区；`git rev-parse --show-toplevel` 成功则再记「git overlay=有」 |
+| `p4 info` 不通、`git status` 通 | **仅 git** | 非 P4 项目 |
+
+顺带记：codex 可用性——`AGENTS.md` 存在即可；`.codex` junction 在 P4 克隆里不会跟过来，只影响 codex 侧 hooks，不阻断派单
+（wrapper 自带 `--skip-git-repo-check -C <root>`，未信任路径也能跑）。
+
+**CoW worktree = 独立工程（一票否决）**：把它当成另一台机器上的另一个项目来编排——
+
+- **边界**：PM 与全部 subagent / codex 的读写只限本工作区根（含 `.taskforce/`）、`~/.claude/taskforce/`、scratchpad。
+  不读其他 worktree / 原始 workspace 的 `.taskforce/`、源码、memory；不把别处的 recon / taskboard 搬进来当 prior
+  （要用旧产物 → 用户显式给路径）。派工 prompt、codex manifest `repoRoot`、fleet outDir 全部写**本**工作区绝对路径。
+- **Editor 绑定（每工作区一个，不排队）**（下文 `Editor bridge` 指常驻 Editor 的桥接进程、
+  `editor-cli` 指驱动它的命令行；没有这套工具的工程整条按 `n/a` 跳过）：每个 worktree 开自己的 Unity（首开要等完整导入 `Library/`）。Editor bridge 端口
+  自动扫 8090–8100 并按项目路径登记到 Editor bridge 的 registry.json；RuntimeTestServer 自动扫 18091–18100 并把端口写进
+  本工程 `Library/runtime_test_server.port`；Editor bridge 与 `editor-cli` 都按 **cwd 所属项目** 匹配实例。所以：
+  ① 任何要碰 Editor 的 agent，cwd 必须在本工作区内；② 进 Play / 改资产前先 `editor-cli verify-project pattern=<本 worktree 目录名>`
+  （或读 registry 核对 `path`），dataPath 不匹配一律停手；③ 本工作区 Editor 未开 → 一句话请用户「在本工作区开 Unity」，
+  记 `UNVERIFIED-EDITOR` 继续做纯文本可做的部分，**不借别的 worktree 的 Editor、不排队、不轮询**。
+  「同机只能一个 Editor / 8090・18091 端口固定」是旧规则，已失效（2026-09-02 实测三个 worktree 三个 Editor 同时在线：8090 / 8091 / 8092）。
+  ④ **归属不是会话常量**：Editor 卡死 → 心跳停 → 被兄弟 Editor 从 registry 清掉 → 端口解析漂移。每一轮 Play 前、每次 Editor 超时/无输出后重跑 `editor-cli health` 核 `editorInstanceId`；看到 `EDITOR_NOT_BOUND` / `WRONG_PROJECT` / `RUNTIME_NOT_BOUND` 停手，禁止换端口继续（实证 evidence.md §3.2 第 8 条）。
+- **跨 worktree 只剩一种耦合：同一 depot stream**。两个 client 各改同一文件要到 submit 才撞车，所以派工前跑一次
+  `p4 opened -a <独占清单>`：命中别的 client 的 CL → 该文件不进本任务独占清单（找本任务独占的替代落点，或登记「待用户裁决」），
+  并在任务板与完成报告点名对方 client / CL。**不发起跨会话文件所有权谈判**（实证 evidence.md §3.2 第 1 条）。`SendMessage` 只在两种情况发、一事一句、无冲突不回复：
+  ① 必须改对方 CL 里已开的文件；② 对方明确请求。
+
+**PM 单例锁与 resume 守卫（一票否决）**：工作区池工具 / Claude Code 可能在原进程仍存活时用同一 transcript 再起一个进程
+（实证 2026-09-02 11:20 / 11:27：三个 PM 各被复制成 2–3 个进程，副本给同一批 subagent id 重发续跑、文件被交替覆写，详见 evidence.md §3.2 第 1 条）。机制：
+
+```bash
+# 开工第一件事（写锁；CLAUDE_PID 是本 Claude Code 进程 PID，harness 注入）
+L=.taskforce/<slug>/pm-lock.json; mkdir -p "$(dirname "$L")"
+printf '{"claudePid":%s,"sessionId":"%s","terminal":"%s","root":"%s","at":"%s"}\n' \
+  "$CLAUDE_PID" "$CLAUDE_CODE_SESSION_ID" "$TERMINAL_HANDLE" "$PWD" "$(date -Iseconds)" > "$L"
+# 任何 resume 标记之后的第一条命令（守卫；Git Bash 下 tasklist 的 /FI 要写成 //FI 防路径转换）
+P=$(python -c "import json;print(json.load(open('$L'))['claudePid'])")
+if [ "$P" != "$CLAUDE_PID" ] && tasklist //FI "PID eq $P" //NH 2>/dev/null | grep -q " $P "; then echo "DUPLICATE pid=$P alive"; else echo "TAKEOVER"; fi
+```
+
+- **resume 标记**（任一出现即触发守卫）：`No completion record was found for … from the previous session`、
+  `Continue from where you left off`、`usage limit has reset`、SessionStart:resume。
+- `DUPLICATE` → 本会话是副本：**不派工、不 SendMessage 给 subagent、不写任务目录 / CL**，向用户回一行
+  「同任务原 PM 进程 <pid> 仍在运行，本会话为副本，已停止；如需接管请先结束该进程」，然后停下。不去和原会话协商。
+- `TAKEOVER` → 原进程已死：把锁改成自己的 PID，再按 §7 中断协议读增量落盘、只重派未完成单元。
+- 锁只在本任务目录，不进版本控制；§6 收口时删除。
+
+**同期任务探测**（与能力探测同时做，结果写任务板"基线"区）：开工前跑两条——`ls -lt .taskforce/*/taskboard.md`
+（本工作区今天活动的兄弟任务）+ `p4 opened -a`（别的 client / CL 开着哪些文件，**多 client 下这是唯一跨 worktree 可见的信号**）。
+然后在**机器级** `_active.md` 登记一行
+`<slug> | <client> | <工作区根> | <CL> | <独占文件集> | agents=<opus/fable 数>/<总数>`，每次派工 / 收工更新 agents 列，收口时删除。
+派工前与它求交集：独占文件重叠 → 按上文「同一 depot stream」处理；agents 列求和用于 §4.2 机器级预算。
+
+**`_active.md` 落在机器级、按 P4 server + stream 分文件，不在工作区里**：
+`~/.claude/taskforce/active/<P4PORT 去端口>__<stream 去 // 且 / 换 _>.md`
+（例：`~/.claude/taskforce/active/<p4 主机名>__streams_main.md`；仅 git 项目用 `git__<远端 repo 名>.md`；
+目录不存在就建）。它只做两件事：跨 worktree 的独占文件可见性、机器级 agent 计数。**不再登记 Editor 占用**（每工作区自己的 Editor），
+旧行里的 `editor=` 列读到就忽略。`ListAgents` 列的是本机全部会话（跨 worktree），`SendMessage` 照常可达，但按上文只在两种情况用。
 
 ---
 
@@ -223,26 +298,43 @@ Wave 1: WP-01, WP-02（并行） → Wave 2: WP-03（依赖 01+02）…    ← S
    由 PM 代为落盘）；之后**所有**派工 prompt 附它的路径。不落盘的侦察 = 每个新 agent
    都从零重探同一片代码，这是长程任务最大的隐性浪费之一。侦察结论只进文件，不堆主上下文。
    S 档不开 recon——dev agent 自己读那 3 个文件比多一次派工便宜。
+   **recon 一律 `Explore`（sonnet），禁止 general-purpose（不论 sonnet 还是 opus）**：general-purpose 会用 `cat` 整文件读源码、
+   一个 recon 跑 100–229 轮（实证 evidence.md §2 v1.3.0、§3.2 第 3 条）。Explore 的回报契约：≤ 80 行、只给 file:line + 一句结论，PM 原样落进
+   `packets/recon-<x>.md`。一个需求 recon 拆片 ≤ 4，每片给明确的目录 / 问题清单，不给"把 X 模块摸一遍"。
+   **已有同源侦察则做 delta，不全量重探**：**本工作区** `.taskforce/` 下若已有同一需求文档 / 同一模块的
+   audit-matrix / recon（先 `grep -l <文档 token 或模块名> .taskforce/*/packets/*.md`；别的 worktree 的不算，要用得用户给路径），本轮只核
+   上轮 PARTIAL / MISSING / BLOCKED 项 + 上轮之后的相关 CL（`p4 changes -m 20 <路径>`），
+   DONE 项抽样 ≤3 条复核即可。
    **recon.md 固定含「矛盾清单」一节**：需求文档内部矛盾、文档 vs 代码现状矛盾、文档 vs
    资产 / 配置数据矛盾。PM 对照验收标准逐条裁定、写进接缝登记表契约列后才派工；
    裁不了的进"待用户裁决"，相关包不派——两个 agent 各持半条矛盾规则时，通信量和 PM 头衔
-   都救不了，只有对着 oracle 裁才行（UCL 2026 conflicting split：2 人扁平队也失败 37%）。
+   都救不了，只有对着 oracle 裁才行（evidence.md §1 第 3 条）。
 2. **独占文件所有权**：每个工作包声明自己独占的文件集合，包间不重叠 →
-   并行不冲突，不需要 worktree。确实避不开共享文件时，把该文件单独划成一个
-   串行包，或对并行包启用 `isolation: "worktree"`。
+   并行不冲突，不需要 worktree。确实避不开共享文件时，**首选把该文件单独划成一个
+   串行包**；确需并行隔离时按 §3 探到的工作区形态选隔离原语，不许凭习惯用 git worktree：
+   - **CoW worktree（独立工程）** → 派到**另一个独立 CoW worktree**（再领一个预热成员，各自 client，
+     秒级、不传字节）：`<池 CLI> worktree create --repo <repo id> --name <包名>
+     --agent claude|codex --prompt "<派工 prompt>"`（子命令形态按你的池工具）。`--repo` **必须显式给 id**（用池 CLI 的仓库列表命令查；
+     工作区池 CLI 目前不能从池化 worktree 目录推断 parent，`--worktree active` 会 `selector_not_found`）。
+     该 worktree 的包仍登记在本 PM 的任务板（执行者列写 `worktree:<名>`），用池 CLI 的终端读写
+     或 `ListAgents`/`SendMessage` 收报；它的改动在**它自己的 client / CL** 里，§6 收口时单独列 CL 号，
+     不能 reopen 到主 CL。
+   - **P4 单 workspace 且 git overlay=有** → 允许 `isolation: "worktree"`（Claude Code git worktree）。
+     注意它不是 P4 client：worktree 里的 `p4` 命令仍走父目录 `.p4config` 的 client，而文件不在其 view 内，
+     只适合纯读 / 产出物落回主工作区的包。
+   - **P4 单 workspace 且无 git**、或任何池化克隆（无 `.git`）→ `isolation: "worktree"` 直接报错，**只能串行**。
 3. **接缝所有权（文件所有权之外的第二层，一票否决）**：分解必然制造包与包之间的
    接口，**每条接缝恰好一个 owner**——文件都有主、接缝无主，团队就在接缝上断
-   （UCL 2026：8 步链 2/4 人时 9/10 成功、8 人时 0/10，舍入约定落在两个 owner 之间
-   无人持有，10 次运行全讨论了、全没解决）。规则：
+   （依据 evidence.md §1 第 1 条）。规则：
    - 拆包时把接缝逐条写进任务板**接缝登记表**（§3 模板）：两端 / owner / 契约 /
      机判验证 / 验证时机 / 版本。**M/L 档波次 1 派工前登记表为空 = 不许派工**。
    - 契约列**禁止「暂名」「以 recon 为准」「签名待定」**。签名定不下来 → owner 包先派、
      先把签名（哪怕是桩）落进登记表，再派消费方——这是依赖排序，不是等待。
    - 派工 prompt 只附该包**拥有**与**消费**的接缝行，不附整表。
-   - 接缝类型逐类过一遍（实践中反复漏的）：跨语言绑定层生成的 wrapper（如 Lua↔C#）；
-     共享 prefab / 资产的其他消费方（按资源 guid 反查）；跨 CL 的提交序依赖；配表列的
-     客户端 / 服务端可见性；协议字段跨端的命名与大小写约定；**非相邻依赖**（跨包共享的
-     常量、阈值、单位、舍入、排序约定——owner 明确、值写进登记表，消费方引用不复制）。
+   - 接缝类型逐类过一遍（本地反复漏的）：跨语言绑定层生成的 wrapper（如 Lua↔C#）；共享 prefab /
+     资产的其他消费方（`grep guid`）；跨 CL 的提交序依赖；配表列的客户端 / 服务端可见性；协议字段跨端的
+     命名与大小写约定；**非相邻依赖**（跨包共享的常量、阈值、单位、舍入、
+     排序约定——owner 明确、值写进登记表，消费方引用不复制）。
    - **改契约 = 在登记表追加版本行**（谁改、改成什么、受影响消费方），无版本行的契约
      改动按越界处理。`SendMessage` 只发一行指针：「接缝 S3 更新至 v2，闸门前重读登记表，
      不需回复」——文件是一对多通道，消息是一对一。**但不要再叠加任何新的文件纪律**
@@ -271,47 +363,51 @@ Wave 1: WP-01, WP-02（并行） → Wave 2: WP-03（依赖 01+02）…    ← S
 | 高阶（例外） | `fable` | 架构设计、跨模块方案、复杂算法、疑难调试、对抗性终验 |
 | 外援（另一个额度池） | `codex`（gpt-5.6-sol / ultra） | **对标 opus 档**：规格已写死、能独立长跑的开发包；第二引擎独立审核；并行独立起草方案。慢（分钟级起步）、无会话续接、不带 Claude 侧工具链（§4.6 / §4.7） |
 
+**额度预算（与 session limit 的关系）**：Claude subagent 与主会话共用同一账户额度；并行的 taskforce
+会话叠加时更是同一个池。实证：2026-09-01 两会话 47 个 agent 同时撞 limit；2026-09-02 三会话 2 小时烧 ≈ 1.65B cache-read 集体撞 limit（evidence.md §3）。因此：
+- **每波同时在跑的 opus/fable agent ≤ 3**（dev + review 合计，记在任务板「在跑」行），其余用
+  sonnet / haiku / codex（另一个池）；
+- **机器级 opus/fable ≤ 4、总 agent ≤ 8**：派工前把 `_active.md` 各行 `agents=` 求和（§3），超了就等；
+  `_active.md` 已有 ≥ 2 个活动任务时，新任务开工回合必须告知用户"账户额度已被 N 个任务分摊，建议串行或降档"；
+- **PM 模型**：审计 / 移植 / 按文档铺量的任务 PM 用 `opus`；只有设计裁决密集的任务才用 fable 开 PM
+  （evidence.md §3.1）；
+- **每个 agent 带预算行**（写进派工 prompt）：dev ≤ 120 轮 / 40 分钟，reviewer ≤ 60 轮，recon(Explore) ≤ 60 轮；
+  到预算即落盘 + 回报"已完成 / 未完成清单"，不追求做完（evidence.md §3.2 第 4 条）；
+- 闭环复审（逐条核对 finding 是否修掉）是机械活 → `sonnet`；接缝扫描 → `haiku`；recon → `Explore`(sonnet)；
+- **长跑 agent 必须增量落盘**：运行时验证 / 大包开发的派工 prompt 写明"每完成一个可独立单元
+  （一条 R 项、一个文件）立即追加到 `packets/<wp>-report.md`"，被杀后 PM 只重派未落盘部分，
+  不从头重跑（§7 中断协议）。
+
 ### 4.3 投机起草（推测解码式：小模型写草稿，审核环节当验证器）
 
-- **规格完整则降一档起草**：接口已钉死、独占文件明确、验收标准可机判的包，
-  按上表定档后**再降一档**派（opus 档的活让 sonnet 先写），赌它一次过审——
-  过了白赚一档差价，没过按 §5.2「拒绝即升档」处理。
-- **模糊/探索性的包不投机**：规格写不死的任务直接按原档派。投机失败的
-  返工 + 多一轮 review 比省下的差价贵。
-- **方案/架构设计恒不投机**（一票否决）：设计包的产出就是规格本身，而投机
-  命中率靠规格喂——给规格生产环节投机是循环依赖。且设计无 oracle（"过审"≠
-  最优解）、审低档草稿有锚定效应（fable 只会在 sonnet 的框架里打补丁）、
-  成本大头在读上下文（fable 审核照样要全量读，省不下）、串行两段反而更慢——
-  准确/成本/速度三头全输。设计包一律 `fable` 直写；**关键架构要更准**时，
-  用"并行独立起草 + 裁决"：fable 与 codex（或两个不同切入角的 fable）**互不
-  可见地**各出一版方案——多样性对设计的增益远大于审核，且并行不拖墙钟，
-  代价只是双份起草钱。互不可见靠**物理隔离**实现：codex 侧用编队的
-  `role=design`（产物默认落任务目录之外的 sealed 区，全部收工才 `-Collect`，§4.6），
-  Claude 侧 agent 的 prompt 里不附对侧路径。裁决归属：
-  - **PM 是 fable → PM 亲自裁决**（裁决就是拍板，是 PM 分内事；且 PM 握有
-    最全的需求意图上下文，新开裁决 agent 反而要从零重读）。但**只裁不写**：
-    产出限于"选谁 + 从败方嫁接哪些点 + 理由"（写进任务板），合成成文用
-    `SendMessage` 发回胜方作者 agent 完成；
-  - PM 低于 fable → 派 fable agent 裁决（裁决档不得低于起草档），PM 复核拍板。
-- **命中率记账（样本量 1 纪律）**：任务板"投机记录"区**只对规格可机判的领域**记草稿
-  过审情况；某领域降档草稿因方向性被拒 → 该领域投机比例降半，不做"连续 2 次即停"——
-  同配置的两次运行本就可以差得很远（UCL 2026 §8：同钉死模型两次采集，一格消息数差
-  15 倍），从 n=2 推政策是噪声。设计判断密集的领域本来就不投机，无需阈值。
-- 推论：**PM 把规格写死的功夫 = 投机命中率**。想省钱先把力气花在接口契约和
-  验收标准上，而不是给起草模型升档。
+- **规格完整则降一档起草**：接口已钉死、独占文件明确、验收标准可机判的包，按 §4.2 定档后**再降一档**派
+  （opus 档的活让 sonnet 先写），过审白赚差价，被拒按 §5.2「拒绝即升档」处理。
+- **模糊 / 探索性的包不投机**：规格写不死的直接按原档派——返工 + 多一轮 review 比差价贵。
+- **方案 / 架构设计恒不投机**（一票否决）：设计产出就是规格本身，无 oracle、审低档草稿有锚定效应、
+  fable 审核照样全量读上下文，准确 / 成本 / 速度三头全输。设计包一律 `fable` 直写；**关键架构要更准**用
+  「并行独立起草 + 裁决」：fable 与 codex（或两个不同切入角的 fable）**互不可见**各出一版
+  （codex 侧 `role=design` 落 sealed 区，Claude 侧 prompt 不附对侧路径）。裁决归属：PM 是 fable → PM 亲自裁、
+  **只裁不写**（产出 = 选谁 + 嫁接哪些点 + 理由，合成发回胜方 agent）；PM 低于 fable → 派 fable agent 裁
+  （裁决档不低于起草档），PM 复核拍板。
+- **命中率记账（样本量 1 纪律）**：任务板「投机记录」只对规格可机判的领域记草稿过审情况；某领域因方向性被拒 →
+  该领域投机比例降半，不做"连续 2 次即停"（依据 evidence.md §1 第 7 条）。
+- 推论：**PM 把规格写死的功夫 = 投机命中率**。想省钱先花在接口契约和验收标准上，不是给起草模型升档。
 
 ### 4.4 花钱纪律（每次派工前过一遍）
 
 1. **先问要不要派**：一次 Grep/Read/Glob 能回答的不派 agent。
 2. **再问能不能并**：同模块的活优先 `SendMessage` 给已有 agent（上下文已缓存，
    增量最便宜），而不是新开一个从零读代码。
-3. **并行有上限**：每波同时在跑的 agent ≤ 6 个（含 codex）。多开不等于快——
-   排队的包留到下一波，别为了"显得热闹"预先全撒出去。
-4. **prompt 收紧**：派工 prompt 只带该包必需的规格与文件清单，不整段粘贴无关
-   上下文；general-purpose 只在确实需要全工具时用，纯侦察一律 `Explore`。
+3. **并行有上限**：每波同时在跑的 agent ≤ 6 个（含 codex），其中 opus/fable ≤ 3（§4.2）。
+   **派工前在任务板「在跑」行数一次，超了不派**——dev 还没收工就叠 review、再叠下一波 dev，
+   是最容易静默突破上限的形态（实证 2026-09-01：6 dev + 3 review + codex 同时在跑，随后撞 limit）。
+   多开不等于快——排队的包留到下一波，别为了"显得热闹"预先全撒出去。
+4. **prompt 收紧**：派工 prompt 只带该包必需的规格与文件清单（给路径，不贴正文），不整段粘贴无关
+   上下文；general-purpose 只在确实需要全工具时用，纯侦察一律 `Explore`。给 dev / reviewer 的 prompt 固定带一行
+   「读文件用 `sed -n a,bp` / `grep -n` 取区间，不 `cat` 超过 200 行的文件；工具回显超 100 行先落文件再读摘要」。
 5. **宁少勿闲**：每个派出的 agent 必须持有**完整包规格 + 它在接缝登记表中拥有 / 消费的
    接缝行**。规格写不满的薄包并入相邻包，不为并行度好看拆薄——什么都不持有的 agent
-   必须向所有人要一切（UCL 2026：8 人队里 4 个无规格 agent 发了 62% 的消息），每多一个
+   必须向所有人要一切（evidence.md §1 第 2 条），每多一个
    agent 还要付一次入职（读任务板 / recon / 登记表）。§4.2 备注列记"为什么这个包值得
    单独一个 agent"。
 
@@ -322,106 +418,73 @@ Wave 1: WP-01, WP-02（并行） → Wave 2: WP-03（依赖 01+02）…    ← S
   发回**原 agent**——它的上下文还在，不必重读代码。
   只有新领域 / 原 agent 已污染跑偏时才开新 agent。
 - 派工 prompt 固定包含：包范围、独占文件清单、接缝登记表中该包拥有 / 消费的行、
-  **验收标准（可机判优先）**、`packets/recon.md` 路径（M/L 档）、"遵守项目 CLAUDE.md 与代码规范"、
+  **验收标准（可机判优先）**、`packets/recon.md` 路径（M/L 档）、**预算行**（§4.2）、**工作区根绝对路径 + "只在此目录内读写"**、
+  "遵守项目 CLAUDE.md 与代码规范"、
   **完工前自跑 §5.0 预扫描 + 廉价闸门 + 自有接缝验证**、回报契约（≤30 行摘要 + 改动文件清单 +
   闸门结果及其 log 路径 / mtime + 接缝验证结果）、禁止碰所有权之外的文件。
-- 两条给 dev agent 的硬约束（写进 prompt）：
+- **早锁（CoW worktree 形态必做；单 workspace 可选）**：派工时 PM 先建本任务 WIP CL（`p4 change -i`，
+  描述 `taskforce <slug> WIP`），把该包**独占清单里已存在的文件** `p4 edit -c <CL>` 锁进去（新增文件由 dev
+  完成后 `p4 add -c <CL>`）。目的：多 client 下别的 worktree 未 checkout 的改动互不可见，`p4 opened -a` 是
+  唯一跨 client 的信号——不早锁，两个 worktree 各改同一文件要到 submit 才撞车。早锁零改动的文件在 §6 由
+  `p4 revert -a -c <CL>` 自动撤回；§6 的 checkout skill 会把已开文件 `reopen` 进新 CL。`p4 edit` 时 P4 提示
+  `also opened by <别的 client>` → 那是兄弟任务，按 §3 同期任务协调后再定，不硬改。WIP CL 号写进任务板
+  「基线」行，dev agent 的 P4 归属守卫（下条）以它为「本任务 CL」。
+- 四条给 dev agent 的硬约束（写进 prompt）：
   - **数据缺失不假设**：发现数据来源有误 / 字段不存在 → **空实现 + TODO 标记**并回报，
     **不自行编造来源**；
-  - **移植类需求不自创绕过**：遇缺失依赖继续从源头移植，禁止 nil 守护 / 空逻辑绕过。
+  - **移植类需求不自创绕过**：遇缺失依赖继续从源头移植，禁止 nil 守护 / 空逻辑绕过；
+  - **P4 归属守卫**：`p4 revert` 只允许 `p4 revert -a -c <本任务 CL>`（撤本 CL 内零改动文件）；对单个
+    文件 revert / `p4 edit -c` 前先 `p4 opened <file>`，`change N ≠ 本任务 CL` 一律不动（实证 2026-09-01 误 revert 兄弟 CL 致对方丢 Drequire，见 evidence.md §2b）。需要往共享文件里加注册 /
+    登记时优先找本任务独占的替代落点（如 `Binary/Game.json` 而非 `WorldMapModule.lua`）；
+  - **需 Editor 落盘的改动先验绑定再查状态**：先 `editor-cli verify-project pattern=<本 worktree 目录名>`（§3 Editor 绑定），
+    再看 `isPlaying`——`true` 时 Editor bridge 写入不落盘；本工作区 Editor 未开或在 Play → 记 `UNVERIFIED-EDITOR`，
+    转做纯文本可做的部分并回报，不轮询、不借别的 worktree 的 Editor。
 
 ### 4.6 codex 编队（多 codex 并行）
 
-单个 codex 比 Claude subagent 慢（分钟级起步），但推理深、吃的是**另一个额度池**。
-过去的用法是一次只起一个、等它回来再起下一个——那等于把最慢的资源串行化。
-现在用**编队**：一次 launch，K 个 codex 同时开工，每个持有自己的包规格与独立输出目录。
-
-**配置对所有 codex 恒定，不逐包调**（`codex-dev.ps1` 的默认值，实测于 2026-08-31 /
-codex-cli 0.150.1）：模型 = `models_cache.json` priority 1（今天是 **gpt-5.6-sol**）、
-`model_reasoning_effort=ultra`、thinking 流开（`model_reasoning_summary=detailed` +
-`show_raw_agent_reasoning=true`）、fast 档（`service_tier=priority`）。
-thinking 流不是给人看热闹的：**写权限包的事后审计只能靠它**（§4.7 复核第 5 条）。
-
-**三步用法**：① 每包写一个 prompt 文件 → ② 写 manifest → ③ 后台 launch + 轮询。
-
-manifest（落 `<task-dir>/codex/fleet-wave1.json`；路径写正斜杠即可）：
-
-```json
-{
-  "repoRoot": "<仓库根>",
-  "workDir":  "<仓库根>/.taskforce/<slug>/codex",
-  "maxParallel": 3,
-  "packets": [
-    { "id": "wp-03", "role": "dev", "promptFile": ".../codex/wp-03.md",
-      "allowWrite": true, "timeoutSec": 3600 },
-    { "id": "wp-05", "role": "dev", "promptFile": ".../codex/wp-05.md" },
-    { "id": "rv-w1", "role": "review", "promptFile": ".../codex/rv-w1.md",
-      "schemaFile": "<skill>/schemas/review-findings.schema.json" }
-  ]
-}
-```
+codex 慢（分钟级起步）但推理深、吃**另一个额度池**；用**编队**一次 launch K 个并行，不要串行等。
+配置对全队恒定（gpt-5.6-sol / effort ultra / thinking 流开 / fast 档，见 [references/codex.md](references/codex.md) §1）。
+**三步**：① 每包一个 prompt 文件 → ② 写 manifest（字段见 codex.md §2；`repoRoot` 必须是**本**工作区根绝对路径）→ ③ 后台 launch + 轮询：
 
 ```powershell
 # ① launch —— 必须 Bash run_in_background:true（脚本自身阻塞到全队收工）
 & "$env:USERPROFILE\.claude\skills\taskforce\scripts\codex-fleet.ps1" -Manifest <manifest>
-# ② 轮询 —— 主线随时可跑，只读，不干扰在跑的 agent
+# ② 轮询 —— 只读，不干扰在跑的 agent
 & "...\codex-fleet.ps1" -Status  -FleetFile <task-dir>\codex\fleet-<id>.json
 # ③ 收口 —— 全队 done 后一次性把产物搬进任务目录
 & "...\codex-fleet.ps1" -Collect -FleetFile <...> -Into <task-dir>\xreview
 ```
 
-**编队纪律**：
-
-- **一包一目录**，脚本拒绝两包共用 outDir。`role=review|design` 的产物默认落**任务目录
-  之外**的 sealed 区，全队收工后 `-Collect` 才搬进来——"够不着"优于"禁止读"（§2.4 末两行）。
-- **并行上限 3（脚本硬顶 6）**，且与 Claude agent **共用** §4.4 的每波 ≤6 预算。
-  加人之前先回答 §2.4 那两行：这个包的规格写满了吗？它拥有哪条接缝？
-- **访问档逐包定**（`access`，默认 `auto`）。⚠️ **codex ≥ 0.150 的 `-s read-only`
-  会拒绝一切子进程**（2026-08-31 实测 0.150.1：只读包连 `dir` 都 `blocked by policy`，
-  却仍然 exit 0 交出一份"很自信的空报告"）。所以：
-  - 不写文件的包 → `prompt-ro`：绕过沙箱，但 wrapper **自动在 prompt 顶部注入只读契约**；
-  - 要改文件的包 → `write`（`allowWrite: true`）：wrapper 注入写契约（只许动独占清单内文件、
-    禁 submit/push/装依赖），仅限规格已写死、独占清单明确的包；
-  - `auto` 在旧版 codex 上仍退回真沙箱 `sandbox-ro`；显式要 `sandbox-ro` 而版本已破 → **脚本报错拒跑**，
-    不交出空壳评审。
-- **契约文本可改，脚本不可塞中文**：只读 / 写契约的正文在 `contracts/read-only.md` 与
-  `contracts/write.md`，改措辞改这两个文件。**不要把中文写回 `.ps1`**——Windows
-  PowerShell 5.1 对无 BOM 的 .ps1 按 ANSI 解码，脚本内的中文字面量会在解析期变成乱码
-  （2026-08-31 实测：注入的契约到 codex 手里是 GBK-as-UTF8 乱码）。两个脚本因此保持纯 ASCII。
-- **fleetFile 路径写进任务板**「codex 编队」区：上下文被压缩后，靠它 `-Status` 一条命令恢复全队状态。
-- **失败不原样重投**：某包 `state=failed` → 读它的 `stderr_log` 定性（鉴权失效 → 提示用户
-  `codex login`），然后**缩包规格或改派 Claude agent**，记任务板。整队起不来 → 明告用户
-  "外援降级，全部由 Claude agent 承担"，不要静默吞掉。
+**编队纪律**（细节与实测签名见 codex.md §3）：
+- **一包一目录**；`role=review|design` 产物落任务目录之外的 sealed 区，收工后 `-Collect` 才搬进来。
+- **并行上限 3（脚本硬顶 6）**，与 Claude agent 共用 §4.4 每波 ≤ 6 预算；加人前先过 §2.4 第 1 / 2 条。
+- **访问档**：不写文件的包 `prompt-ro`（wrapper 注入只读契约），要改文件的包 `write`（注入写契约，仅限规格已写死的包）。
+  ⚠️ codex ≥ 0.150 的 `sandbox-ro` 拒绝一切子进程却 exit 0 交空报告——脚本对显式 `sandbox-ro` 报错拒跑。
+- **契约文本在 `contracts/*.md`，两个 `.ps1` 保持纯 ASCII**（PowerShell 5.1 对无 BOM 脚本按 ANSI 解码，中文会乱码）。
+- **fleetFile 路径写进任务板**「codex 编队」区，压缩后靠 `-Status` 恢复全队状态。
+- **失败不原样重投**：读 `stderr_log` 定性（噪声与真失败判别见 codex.md §3）→ 缩包规格或改派 Claude agent；
+  整队起不来 → 明告用户"外援降级"，不静默吞掉。
 
 ### 4.7 codex 派单开发（对标 opus 档）与主 agent 复核
 
-codex 不只当审核外援，**也承接开发包**：能派给 `opus` 的包就能派给 codex。
+能派给 `opus` 的包就能派给 codex。**三条准入全中才派**：① 规格已写死（接口 / 独占文件 / 验收标准可机判）；
+② 能独立长跑、不需要快速多轮往返；③ 不依赖 Claude 侧工具链（Editor bridge / `editor-cli` / 自动化测试 skill）。
+边探索边改、需频繁追问、依赖 Editor 交互的包留给 Claude agent。
 
-**派给 codex 的三条准入（全中才派）**：① 规格已写死（接口 / 独占文件 / 验收标准可机判）；
-② 能独立长跑、不需要快速多轮往返；③ 不依赖 Claude 侧专有工具链（引擎内自动化测试、浏览器自动化等
-只有 Claude agent 才有的 skill）。**反例**：边探索边改的模糊包、需要频繁追问的包、
-依赖编辑器交互的包——这些留给 Claude agent。
+**派单 prompt** 与 Claude dev agent 同一套（§4.5；骨架见 convergence.md §6）。写权限包的边界由 wrapper 契约兜底，
+**但 prompt 里仍要把独占清单列全**——契约只说边界在哪，清单才说边界是什么。
 
-**派单 prompt 必带**（与 Claude dev agent 同一套，不因为是外援就放松，见 §4.5）：
-包范围 + 独占文件清单 + 接缝登记表中它拥有 / 消费的行 + 验收标准 + `packets/recon.md` 路径 +
-"遵守项目 CLAUDE.md 与代码规范" + 完工前自跑 §5.0 预扫描与廉价闸门 +
-回报契约（≤30 行摘要 + 改动文件清单 + 闸门结果及 log 路径 / mtime）+
-数据缺失不假设 / 移植类不自创绕过。写权限包的"只许改清单内文件"由 wrapper 契约兜底，
-**但 prompt 里仍要把清单列全**——契约只说边界在哪，清单才说边界是什么。
-
-**主 agent 复核（一票否决，五条全过才收）**。codex 的产出**不因为模型强而免检**：
+**主 agent 复核（一票否决，五条全过才收）**，codex 产出不因模型强而免检：
 
 | # | 复核项 | 怎么做 | 不过怎么办 |
 |---|---|---|---|
 | 1 | **越界** | `p4 opened` / `git diff --name-only` 与独占清单求差 | 非空即整包打回 |
 | 2 | **闸门** | 不采信自报：要 log 路径 + mtime 晚于该包 launch 时刻 | 缺证据派 `haiku` 复跑 |
 | 3 | **独立 review** | 走 §5.1；**永不由 codex 自评**，也不由同队另一个 codex 包审自家 diff | 按 §5.2 处置 |
-| 4 | **根因优先** | 抽查有没有 nil 守卫 / try-catch / 特例分支绕过——外援看不到项目历史，最容易在这里打补丁 | 按方向性错误处理 |
-| 5 | **thinking 日志** | 写权限包读一遍 `stdout.log` / `stderr.log` 的推理流，确认它没顺手动清单外的东西 | 越界即打回 + 该包降级为 Claude 重写 |
+| 4 | **根因优先** | 抽查 nil 守卫 / try-catch / 特例分支绕过——外援看不到项目历史，最容易在这里打补丁 | 按方向性错误处理 |
+| 5 | **thinking 日志** | 写权限包读一遍 `stdout.log` / `stderr.log` 推理流，确认没顺手动清单外的东西 | 越界即打回 + 降级为 Claude 重写 |
 
-**codex 无会话续接**（wrapper 每次都是新 turn），所以 §5.2 的"细节问题 `SendMessage`
-派回原 agent"对它不适用：细节修复 = **重投一个带 finding 全文的修复包**（prompt 里附上
-上一轮的改动清单与 blocker）；方向性错误 = 直接换 Claude agent（`opus` / `fable`）重写。
+**codex 无会话续接**：细节修复 = 重投一个带 finding 全文 + 上一轮改动清单的修复包；方向性错误 = 换 Claude agent 重写。
 
 ---
 
@@ -440,35 +503,27 @@ dev 完成 → 预扫描 → 廉价闸门 → review（档位定强度）→ 细
 它**不替代**独立 review（独立性查的是实现者自己的盲区），但把「机械漏改」类 blocker
 在昂贵 subagent 之前消化掉。
 
-**廉价闸门**：lint / 编译 / 相关测试 / 引擎内自动化测试（如项目具备）/ **自有接缝验证**
+**廉价闸门**：lint / 编译 / 相关测试 / 自动化测试 skill（有 Unity 时）/ **自有接缝验证**
 （接缝登记表里该包为 owner 的每一行，跑其"机判验证"列：grep 全调用方 / 编译 / wrapper
-重生成 / 资源引用反查）。
+重生成编译 / guid 反查）/ **本包运行时冒烟**（触及 UI / 场景 / 资产 / 运行时注册的包，§5.5 规则 1）。
 - **闸门结果不采信自报**：回报必须附 log 文件路径 + mtime（晚于本轮 dev 开始时刻），
-  否则视为未过闸——由 `haiku` runner 独立复跑后才算数（实证：某包自报"编译 PASS"
-  其实是过期查询结果，被相邻包实测撞出 FAIL）。
-- **越界检查脚本化**：`p4 opened` / `git diff --name-only` 与独占声明求差，非空即打回，
+  否则视为未过闸——由 `haiku` runner 独立复跑后才算数（实证 2026-08-20 stale 编译自报，见 evidence.md §2b）。
+- **越界检查脚本化**：`p4 opened -c <CL>` **∪** `p4 diff -f -sa`（allwrite 下没 `p4 edit` 就改的文件不会
+  出现在 `opened` 里）/ `git diff --name-only` 与独占声明求差，非空即打回，
   不靠 PM 肉眼；契约改动无登记表版本行同样按越界处理。
 - **不过闸的直接打回原 agent，不进 review**——免费的精确验证先滤掉注定被拒的草稿。
 - **测试失败是回路里的一种 blocker，不是终点**：自动化测试 FAIL 记成 `source=autotest`
-  的 blocker 流进 §5.2 修复，下一轮重跑。测试环境不可用 → 降级记 `UNVERIFIED`，不算 fail。
+  的 blocker 流进 §5.2 修复，下一轮重跑。Unity 不可用 → 降级记 `UNVERIFIED`，不算 fail。
 
 ### 5.1 review 分级路由（全流程最贵的环节，按**包档**分流）
 
 先生成本轮 diff 工件（`p4 diff -du` / `git diff`）落一个 `.diff` 文件，
 **所有 reviewer 的输入 = 这份 diff + 验收标准 + 规则路径**，不让每个 reviewer 各自 Read 整模块。
 
-**双引擎独立性隔离（一票否决）**：两侧 reviewer 的**输入与产物目录必须隔离**——外援（codex）
-的输入单独复制一份（如 `codex/input.diff`）；两侧产物**先写到任务目录外**（scratchpad 各自
-独立子目录），双方都完成后再搬进 `xreview/`——"禁读"改为"够不着"：先落盘的一侧结论对后跑
-的一侧是污染源，且显式禁读在那次事故里已经写了仍被违反（实证：codex 把同目录已存在的
-Claude 侧结论文件逐字抄成自己的结论；UCL 2026 sealed 复现：无 prompt 要求下 80% 的运行去翻
-评分诱饵、66% 翻其他 agent 的私有 prompt——路径够得着就会去够）。Claude subagent 可保留
-prompt 级禁读作第二道，codex 一律物理隔离。
-外援 wrapper 一律写明**反造假契约**：produce or fail——外援失败必须如实报失败，严禁 wrapper
-代写审查内容。PM 收外援结论先验真三项：输出文件 mtime 晚于启动时刻、有 stdout/stderr 日志链、
-内容与对侧首行不同；任一不过即作废重跑。
-**第四项验真（codex ≥ 0.150 专属）**：确认该包不是 `sandbox-ro`——只读沙箱下 codex 跑不了任何
-子进程，会交出一份 exit 0 的空报告（§4.6）。编队默认 `prompt-ro` 已避开，手工起的单包要自查。
+**双引擎独立性隔离（一票否决）**：两侧 reviewer 的输入与产物目录物理隔离——codex 输入单独复制一份（`codex/input.diff`），
+两侧产物先写到任务目录外、双方都完成再搬进 `xreview/`（"禁读"改为"够不着"，依据 evidence.md §1 第 5 条、§2b 2026-08-24）。
+外援 wrapper 写明**反造假契约**（produce or fail）。PM 收外援结论先验真四项：输出 mtime 晚于启动、有 stdout/stderr 日志链、
+内容与对侧首行不同、该包不是 `sandbox-ro`（§4.6）；任一不过即作废重跑。
 
 | 包档 | review 强度 |
 |---|---|
@@ -476,58 +531,31 @@ prompt 级禁读作第二道，codex 一律物理隔离。
 | **M** | **双引擎并行独立审**：Claude reviewer subagent（`opus`）+ codex 编队 `role=review` 包各出一份**结构化 findings**（`schemas/review-findings.schema.json`），再走 §5.2 的一轮质证收敛；相邻小包攒到同波结束**合并成一次**，不逐包各跑一轮 |
 | **L**（核心/高风险） | M 的双引擎，每侧再加一个**不同切入角**（一侧正确性 / 根因，另一侧需求覆盖 / 项目规则），仍是各自独立；**确认轮加 1 个 completeness-critic 单镜头**（"前几轮漏了什么"），不重开全套 |
 
-**为什么不外包给通用的交叉审核 skill**：那类 skill 产出的是自然语言意见，不带「处理建议 +
-处理方式 + 根因归属层」，也不带机器可归并的表态字段，收敛只能靠 PM 手工读两份散文对齐——
-正是"各说各话"的来源。用本 skill 自己的两份 schema，收敛规则才能机械执行（§5.2）。
-用户显式要求时仍可改用外部交叉审核 skill，但要知道 §5.2 的归并规则对它不成立。
+**包档按内容定，不继承任务档**：从 depot 历史 / 参考工程（w3、sp）**搬运还原**的文件、配表 / 图标搬运、改名、文档同步
+= 机械包 → 恒按 **S 审**，哪怕任务是 L 档；只有本任务新写的业务逻辑才吃 M/L 双引擎。
+**每波 reviewer 数 ≤ 该波 dev agent 数**，同波相邻小包合并成一次 review（实证 evidence.md §3.2 第 5 条）。
 
-**设计意图保真**（弱 subagent 执行强设计时的专项缺口）：独立 reviewer 只拿到
-diff + 验收标准，**不知道设计理由**——"能跑、符合字面标准、但违背设计初衷"会静默通过。
-两级解法，优先第一级：
+**不默认外包给通用的交叉审核 skill**：它产出自然语言意见，无「处理建议 + 处理方式 + 根因归属层」与机器可归并的表态字段，
+收敛只能靠 PM 手工对齐两份散文；其 codex 侧走 `max` 而非 `ultra`，§5.2 归并规则对它不成立。用户显式要求时才用。
 
-1. **把设计意图编码进验收标准与接口契约**。凡能写成"当 X，系统应 Y"的一律写进去，
-   「需求覆盖」视角天然就在验它，零额外成本，且顺带提高投机命中率（§4.3）。
-2. 编不动的（架构约束、分层意图、"为什么不能那样写"）→ 加一个 **design-conformance
-   reviewer**：`fable` 档、**独立 subagent**、输入 = 设计文档 + diff（**不喂实现者推理**），
-   单一职责是"实现有没有偏离设计意图"。**只在 L 档核心包开**；它是独立的第 N 个
-   reviewer，**不是 PM 本人**——PM 自己去验自己裁决的设计就是 §1 禁的锚定偏误。
+**设计意图保真**：reviewer 只拿 diff + 验收标准，不知设计理由。优先把设计意图**编码进验收标准与接口契约**（需求覆盖视角天然验它）；
+编不动的架构约束 / 分层意图 → **只在 L 档核心包**加一个 `fable` 档 **design-conformance reviewer**（输入 = 设计文档 + diff，不喂实现者推理），
+它是独立的第 N 个 reviewer，**不是 PM 本人**（§1 锚定偏误）。
 
-**reviewer 硬约束**（写进 prompt）：
-- 只读 ① 本轮 diff ② diff 命中行的直接上下文与直接调用方（`grep` 出来精读命中行）
-  ③ 验收标准与规则路径。**禁止**为求"全面"通读未改模块。
-- **区分 pre-existing 瑕疵与改动漏点**：与本次改动无关的既有瑕疵至多 INFO，不报 BLOCK；
-  但「本次改动本应覆盖却漏掉的点」（被改签名的调用方没跟改、新字段在另一产出点没透传、
-  旧语义还有残留引用）**是 BLOCK**——它不是无关既有问题，是改动本身不完整。
-- **terse 输出契约**：只输出 `[级别] file:line — 一句话问题 — ≤1 行证据`，
-  无则单行 `NO BLOCKERS`，末行 `BLOCK: N`。不复述 diff、不列逐条验收标准通过表、不写过程叙述。
-
-各视角的 prompt 要点见 [references/convergence.md](references/convergence.md)。
-
-**互判一轮的产出是证据分层，不是收敛判定**：互判一轮下提出方听不到反驳，
-"双方一致否决"这个出口不存在——accepted（双发命中 / AGREE）可信，被单侧 REJECT 的和
-交叉轮新增的 finding 都停在争议态，走下面的实证分流。
+**reviewer 硬约束三条写进每份 prompt**（细则与各视角要点见 [references/convergence.md](references/convergence.md) §2）：
+① 只读本轮 diff + 命中行直接上下文与直接调用方 + 验收标准 / 规则路径，禁止通读未改模块；
+② pre-existing 瑕疵至多 INFO，但「因本次改动才需跟改却漏掉」的点是 BLOCK；
+③ terse 输出：`[级别] file:line — 一句话 — ≤1 行证据`，无则 `NO BLOCKERS`，末行 `BLOCK: N`。
 
 ### 5.2 交叉收敛协议（快速收敛，严禁各说各话）
 
-双引擎的价值在于**两种偏误不重叠**，不在于开辩论会。所以收敛是**机械归并 + 至多一轮质证 +
-一次实证裁决**，全程有硬时限，任何一步都不允许退化成"我觉得 / 它觉得"。
+双引擎的价值在于**两种偏误不重叠**，不在于开辩论会：收敛 = **机械归并 + 至多一轮质证 + 一次实证裁决**，
+任何一步不许退化成"我觉得 / 它觉得"。prompt 骨架与归并工作表见 convergence.md §5。
 
-**Round 0 — 独立出结论**（两侧互不可见，产物物理隔离，§5.1）。
-两侧都必须按 `schemas/review-findings.schema.json` 输出，每条 finding 强制带：
-`severity / file:line / claim / evidence（≤1 行代码级证据）/ root_cause / pre_existing /
-confidence / fix{layer, files, how, risk}`。
-**没有 `fix` 的 finding 不算 finding**——审核的产物是"处理建议 + 处理方式"，不是"这里我不喜欢"。
-`fix.layer` 必须给出**根因归属层**（code / config-table / asset / proto / third-party / spec），
-归属层不是"谁改起来快"（遵循所在项目的修复归属层级规范）。
-
-**Round 1 — 唯一一轮质证**（互喂对方的 findings，按 `schemas/review-rebuttal.schema.json` 回）。
-逐条表态 `AGREE / PARTIAL / REJECT` + `reason` + `evidence` + `disposition` +
-`fix_agreement`（same / different / n/a）+ `counter_fix`。三条硬约束：
-- **必须逐条表态**：对方的每条都要有一行。**未表态视同 AGREE**——沉默不是立场，是拖延。
-- **不许开新战场**：本轮只准就对方的 findings 表态；漏掉的 BLOCK 走 `missed_by_other` 字段，
-  **至多 3 条**，其余留到下一包/终验。
-- **不许无证据的 REJECT**：`REJECT` 而 `evidence` 为空 → 该表态直接作废（按 AGREE 计），
-  哪一侧都一样。
+- **Round 0 独立出结论**（两侧互不可见）：按 `schemas/review-findings.schema.json` 输出；**没有 `fix` 的 finding 不算 finding**，
+  `fix.layer` 必须给根因归属层（code / config-table / asset / proto / third-party / spec，见所在项目的修复归属层级规范）。
+- **Round 1 唯一一轮质证**：按 `schemas/review-rebuttal.schema.json` 逐条 `AGREE / PARTIAL / REJECT`。三条硬约束：
+  **未表态视同 AGREE**；**不开新战场**（漏掉的 BLOCK 走 `missed_by_other`，至多 3 条）；**无证据的 REJECT 作废按 AGREE 计**。
 
 **归并规则（机械执行，PM 不参与辩论）**：
 
@@ -539,39 +567,22 @@ confidence / fix{layer, files, how, risk}`。
 | PARTIAL（严重度或根因不一致） | 按**较低严重度 + 较深根因**收编 | 进修复队列，根因以能被证据支撑的那个为准 |
 | 仅 WARN / INFO 级争议 | **不进 probe** | 记任务板"已知风险"，不阻塞收敛 |
 
-**实证裁决（终局，不再往返）**：BLOCK 级争议派一个 `opus` verifier 对着代码取证——读调用链 /
-写最小复现 / 跑测试 / runtime probe，产出 `accepted | dropped` + 一行证据。
-**verifier 的结论是终局**，两侧都不再表态。**每包 probe 队列上限 3 条**（按 severity ×
-confidence 排序），超出的降级登记"已知风险"——probe 是最贵的一步，不许排长队。
-
-**修法冲突（`fix_agreement=different`）由 PM 一次拍板**，按序判据：
-① 根因归属层正确（跨层补偿的方案直接淘汰）→ ② 改动面最小 → ③ 与既有代码惯例一致。
-裁定写进任务板一行（选了谁 / 依据），**不再征求两侧意见**。
-
-**时限与降级**（防止等外援等成空转）：codex 侧超时或 `state=failed` → 用单侧结论继续，
-任务板记 `XREVIEW-DEGRADED: codex <原因>`，不空等、也不悄悄当成"没问题"。
-
-**定性派修（拒绝即升档）**。PM 把 accepted 的 finding 分两类：
-- **细节问题**（边界漏判、命名、局部逻辑、性能微调）→ `SendMessage` 派回**原开发 agent** 修
-  （带上 finding 原文与 `fix.how`），不换人——它最懂自己的代码。
-  原开发者是 codex 时改为**重投带 finding 的修复包**（§4.7 末段）。
-- **方向性 / 架构性错误**（方案本身不对、契约理解错、结构要推倒）→ **不进修复循环**，
-  按分级表原档（或升一档）**换 agent 重写该包**，旧草稿作废但把 finding 附给新 agent 当反面参考。
-  让小模型对着方向错误修 3 轮是最贵的空转方式。定性拿不准时按方向性处理——
-  升档重写的上限成本可控，空转循环的不可控。投机降档的包被方向性拒绝 → 记入"投机记录"，
-  并**同时触发包档升档**（§2.3）。
-
-修复必须**根因优先**：每个 blocker 追到根因再改，禁 nil 守卫 / try-catch 吞错 / 特例分支掩盖。
-测试类 blocker 按结构化调试方法论（假设→埋点→复现→分析→修）；**临时埋点写文件不写 console**
-（按所在项目的埋点规范落文件日志，带 `[DEBUG-BEGIN]/[DEBUG-END]` 块标记），
-**修复确认后清理**（用项目的埋点清理工具 + grep 验无残留）。
-
-prompt 模板与逐条判据见 [references/convergence.md](references/convergence.md) §5。
+- **实证裁决是终局**：BLOCK 级争议派一个 `opus` verifier 对着代码取证（调用链 / 最小复现 / 测试 / runtime probe），
+  产出 `accepted | dropped` + 一行证据，两侧不再表态。**每包 probe 队列 ≤ 3 条**（severity × confidence 排序），溢出登记"已知风险"。
+- **修法冲突（`fix_agreement=different`）PM 一次拍板**：① 根因归属层正确（跨层补偿直接淘汰）→ ② 改动面最小 → ③ 合既有惯例；
+  写任务板一行，不再征求两侧意见。
+- **时限与降级**：codex 侧超时或 `state=failed` → 用单侧结论继续，任务板记 `XREVIEW-DEGRADED: codex <原因>`，不空等也不当"没问题"。
+- **定性派修（拒绝即升档）**：**细节问题**（边界漏判、命名、局部逻辑）→ `SendMessage` 派回**原开发 agent**（附 finding 原文与 `fix.how`；
+  原开发者是 codex 则重投修复包）；**方向性 / 架构性错误** → **不进修复循环**，按原档或升一档**换 agent 重写该包**，finding 附给
+  新 agent 当反面参考；拿不准按方向性处理。投机降档包被方向性拒绝 → 记「投机记录」并触发包档升档（§2.3）。
+- **修复根因优先**：禁 nil 守卫 / try-catch 吞错 / 特例分支掩盖。测试类 blocker 按结构化调试方法论；临时埋点写文件不写 console
+  （按项目的埋点规范落文件日志，`[DEBUG-BEGIN]/[DEBUG-END]` 标记），修复确认后 用项目的埋点清理工具 + grep 验无残留。
 
 ### 5.3 收敛判定与升级守卫
 
-**复审降档**：细节修复后**不重跑全量交叉审核**——派一个 `opus` reviewer 逐条核对
-finding 是否闭环 + 修复 diff 有无引入新问题即可；只有修复本身涉及结构性改动时才重跑交叉审核。
+**复审降档**：细节修复后**不重跑全量交叉审核**——派一个 `sonnet` reviewer 逐条核对
+finding 是否闭环 + 修复 diff 有无引入新问题即可（机械核对不需要 opus；它发现新的结构性问题时
+再升 opus 单看那一条）；只有修复本身涉及结构性改动时才重跑交叉审核。
 
 **收敛标准**：无未处置的 BLOCK（仍在争议中的也算未处置，必须先过实证分流）、
 WARN 已修或已登记"已知风险"或用户明示接受、性能类 finding 已落实、客观闸门全绿。
@@ -592,16 +603,37 @@ WARN 已修或已登记"已知风险"或用户明示接受、性能类 finding �
 ### 5.4 接缝扫描（M/L 档）与终验（仅 L 档）
 
 **接缝验证不等终验**——每包闸门全绿 ≠ 集成通过：错配对每个 agent 都不可见，成品也能跑
-（实证：一个共享 prefab 被某包改动后炸穿了另一模块的相机，前序轮次全部零感知，
-到终验才发现）。
+（实证 2026-08-20 共享 prefab 炸穿另一模块的相机，见 evidence.md §2b）。
 - **owner 闸门时**：该包自跑自有接缝验证（§5.0）。
-- **每个波次边界**：派 `haiku` 跑接缝登记表**全表**扫描（grep / 编译 / wrapper 重生成 / 资源
-  引用反查，成本 ≈ 一批 grep），结果写任务板；M 档且包数 ≥2 且登记表非空即必跑。
+- **每个波次边界**：派 `haiku` 跑接缝登记表**全表**扫描（grep / 编译 / wrapper 重生成 / 资源引用反查，
+  成本 ≈ 一批 grep），结果写任务板；M 档且包数 ≥2 且登记表非空即必跑。
 - **L 档终验**：全部包 done 后派一个 `fable` agent 做跨包集成审视——输入 = **接缝登记表全绿
   证据 + 全量 diff**，而不是从头找缝；并派 agent 跑项目既有闸门（lint / 测试 / 构建）。
   全绿才进 §6。
+- **终验结论与前序闭环复审矛盾时不开辩论、不让 dev 反驳**：直接按 §5.2 派 verifier 实证
+  （实证 2026-09-01 `CardStatusCtrl` 三段往返，见 evidence.md §2b）。
 
 终验若仍新发现接缝 → 说明 §4.1.3 的接缝类型枚举漏了一类，补进去。
+
+### 5.5 运行时验证（Editor Play）——前移、分片、缺陷先钉根因
+
+**问题形态**见 evidence.md §2b（2026-09-01 `task-d`：4 轮 Play 2h20m 占墙钟 45%、一个缺陷连改 3 次、一个假缺陷派修再撤回）。
+
+三条规则：
+
+1. **验证前移到包闸门**：触及 UI / 场景 / 资产 / 运行时注册（Drequire、ViewDefine、AA 地址）的包，
+   完工闸门必含**本包冒烟**（1–3 条本包核心断言，自动化测试 skill 或 `editor-cli` probe），由 dev agent 在**本工作区自己的**
+   Editor 上跑（§3 Editor 绑定：先 `verify-project`）。本工作区 Editor 未开时记 `UNVERIFIED-EDITOR` 先进 review，
+   但**不进 §6 收口**——请用户在本工作区开 Unity，不借别的 worktree。
+2. **集成验证分片 + 只复测失败项**：波次收尾的跨包运行时验证条目 ≤ 8（只保留跨包链路，包内断言已在
+   冒烟里跑过）；条目 > 8 或预计 > 30 分钟 → 拆成多片，每片一个 agent、一次 Play 会话；每条结果
+   **即时追加落盘**（§4.2 额度预算）。缺陷修复后**只复测失败项 + 直接相关项**，不从 R1 重跑。
+3. **缺陷先钉根因再派修（一票否决）**：验证 agent 报缺陷前必须在 Play 现场完成三件事——
+   ① 用**真实调用路径**（真按钮 / 真 handler 注册表 / 真事件）复现 ≥ 2 次，排除 probe 自身的调用约定
+   差异；② probe 出根因证据（nil 的是哪个变量、哪一层没走到、资产 meta 哪个字段、prefab 是否模块常驻）；
+   ③ 按 [references/convergence.md](references/convergence.md) §7 的缺陷记录格式落盘。
+   PM 派修时把该记录整段附给 dev agent，dev 的修复方案**必须引用其中的证据**，不许凭读码猜；
+   **同一缺陷第 2 次修复复测仍失败 → 停止派修**，按 §5.2 派 verifier 实证根因，不许第 3 次盲修。
 
 ---
 
@@ -621,11 +653,16 @@ WARN 已修或已登记"已知风险"或用户明示接受、性能类 finding �
    | 仅 git | 跳过（各包的检查点 commit 已是收口），报告里注明 |
 
    新增/删除 C# 脚本**连同 Unity 同名 `.meta`** 一并处理。CL 号写进任务板。
+   **CoW worktree 形态补三步**（单 workspace 若用了早锁只做 ①）：① 先 `p4 revert -a -c <WIP CL>` 撤早锁中
+   零改动的文件，checkout skill 会把其余已开文件 `reopen` 到新 CL，WIP CL 变空后 `p4 change -d`；② 派到独立
+   CoW worktree 的包在**它自己的 client** 里各走一遍本步（不同 client 的文件不能 reopen 进同一个 CL），
+   报告按 client 分列 CL 号；③ 从机器级 `_active.md` 删本任务行、删 `pm-lock.json`（§3）。worktree 本体不由 taskforce 删除——
+   是否 `<池 CLI> 的 worktree 删除命令` 归用户。
 3. **绝不 submit**：收口只把改动聚合进 **pending** changelist 供复核，
    提交决定永远归用户。这是一票否决项。
 4. **输出完成报告**（模板见 [references/convergence.md](references/convergence.md)）：结论 +
    验收标准达成 + 产出文件 + 收敛轨迹 + **接缝统计**（登记 N 条 / owner 全覆盖 / 波次扫描 K 次 /
-   终验新发现接缝 0）+ **待关注**（空实现 TODO / UNVERIFIED 断言 /
+   终验新发现接缝 0）+ **待关注**（空实现 TODO / UNVERIFIED 与 UNVERIFIED-EDITOR 断言 /
    视觉副作用 / 已知风险 / 升级类未解 blocker）+ CL 号 + 下一步。
 5. 可选：高频 blocker / 规范缺口 / 新陷阱 → 建议沉淀进项目知识体系。
 
@@ -636,9 +673,16 @@ WARN 已修或已登记"已知风险"或用户明示接受、性能类 finding �
 - **波次边界必做**：更新 taskboard + resume → `haiku` 接缝扫描（§5.4）→ 向用户播报进度
   （一张状态表）→ 提示可 /compact → 发起下一波。**别等 150k 才压**：任务板齐全的前提下，
   越早压越省；整个任务收尾后提示用户 /clear 再开新任务，不带着尸体上下文续命。
+  PM 无法自己 /compact，用户不在场时没人会压——所以真正的杠杆是 §1「PM 上下文有预算」：少进来比多压掉可靠。
 - **等待期不空转**：codex 编队或慢包在后台跑时，继续推进其他包 / 侦察下一波。
   查进度用 `codex-fleet.ps1 -Status -FleetFile <...>`（只读、不打扰在跑的 agent），
   别去 tail 它的日志猜进度。绝不写"我预计它会返回…"——没收到任务通知就是还在跑。
+- **等待 Editor 不算推进**：本任务只剩 Play 验证而本工作区 Editor 未开 → 向用户播报一次
+  「请在本工作区开 Unity，其余已就绪」并进入 /compact 安全点；不轮询、不借别的 worktree 的 Editor。
+- **被 session limit / 进程重启打断**：恢复后**第一条命令是 §3 的 PM 锁守卫**——`DUPLICATE` 就停，
+  `TAKEOVER` 才读各长跑 agent 的增量落盘（§4.2）、只重派未完成的单元；
+  把「中断时刻 + 被杀 agent + 已落盘到哪」记进任务板「档位轨迹」区，别从头重跑。
+  「No completion record was found … from the previous session」**不等于** agent 死了——原进程可能还在跑它。
 - **卡死/空产出不原样重试**：agent 卡死、返回为空或明显跑偏 → 先弄清它卡在
   哪（读它的最后回报/日志），然后**缩小包规格或升档换人**重派，并记入任务板。
   不带诊断的原样重试是在花钱抽样——同配置的两次运行本可以差很远（UCL 2026 §8），
@@ -668,15 +712,14 @@ WARN 已修或已登记"已知风险"或用户明示接受、性能类 finding �
 
 ## 参考
 
-- Destefanis & Aste, *When Agents Coordinate: Measuring Coordination in Multi-Agent AI Coding*,
-  UCL, 2026 — https://arxiv.org/abs/2608.16801 （1902 次评分运行 + 244 次密封复现，模型钉死
-  sonnet-4-6）。v1.1.0（2026-08-27）依据其四个结构性发现（接缝无主则断 / 闲置 agent 制造 62%
-  通信 / 文件通道的条件收益 / 单次运行 = 样本量 1）与本地 16 次 taskforce 运行实证，修订
-  §2.1 §3 §4.1 §4.3 §4.4 §4.5 §5.0 §5.1 §5.4 §6 §7。
-  v1.2.0（2026-08-31）把这些发现固化成 **§2.4 七条防线**（每开一个 agent 前自查），并在
-  真并行落地（§4.6 codex 编队 / §4.7 派单开发 + 复核 / §5.2 交叉收敛协议）时逐条对齐：
-  越界翻看 → 编队一包一目录 + sealed 区；协调者头衔无效 → 归并规则机械化、PM 只在修法冲突时
-  一次拍板；加人不等于加产能 → 并行上限与"规格写满了吗"前置自查。
-- 实测签名（2026-08-31，codex-cli 0.150.1 / gpt-5.6-sol）：`exec` 下 `effort=ultra` 正常收敛
-  （旧注释"ultra 在 exec 下不可用"已作废）；`-s read-only` **拒绝一切子进程**
-  （`dir` 亦 `blocked by policy`）却仍 exit 0，只读评审必须走 `prompt-ro`（§4.6）。
+- Destefanis & Aste, *When Agents Coordinate: Measuring Coordination in Multi-Agent AI Coding*, UCL, 2026 —
+  https://arxiv.org/abs/2608.16801 。七条防线（§2.4）的实测数字、v1.1.0–v1.4.0 修订史与各次实测签名见
+  [references/evidence.md](references/evidence.md)。
+- v1.5.0（2026-09-02）：复盘同日并行的三个 CoW worktree 任务（`task-a` / `task-b` / `task-c`，
+  10:35–12:36 撞 session limit，零收口；数据见 evidence.md §3）。根因：① 工作区池工具在 11:20 / 11:27 用同一 transcript 重起进程而
+  原进程未退出，三个 PM 各被复制成 2–3 份，副本按中断协议重派同一批 subagent；② 三个 fable PM 0 次 compact、上下文 460–520K；
+  ③ recon 全用 general-purpose 而非 Explore；④「单 Editor 排队」假设已过期（三个 worktree 三个 Editor 同时在线）。
+  修订：§3 重写为「CoW worktree = 独立工程」（边界 / 每工作区 Editor 绑定 / 只剩 depot 耦合）+ PM 单例锁与 resume 守卫；
+  §1 PM 只在本工作区活动 + 上下文预算；§2.1 审计型需求两段式；§2.4 表格移 evidence.md；§4.1.1 recon 一律 Explore + delta 限本工作区；
+  §4.2 机器级预算 + PM 模型 + agent 预算行；§4.4 / §4.5 prompt 读文件纪律 + Editor 绑定；§5.1 机械包恒 S 审 + reviewer ≤ dev；
+  §5.5 / §6 / §7 去掉 Editor 排队、中断协议先过锁；`references/convergence.md` §7.1 前置改为 Editor 绑定验证。
